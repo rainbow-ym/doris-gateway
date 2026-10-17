@@ -1,0 +1,32 @@
+server:
+  address: ${ADMIN_BIND_ADDRESS:127.0.0.1}
+  port: ${ADMIN_PORT:18080}
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        same-site: strict
+
+spring:
+  datasource:
+    # 每个 worker 独占管理库，使用嵌入式模式，避免自动服务依赖本机名称解析。
+    url: jdbc:h2:file:${ADMIN_DATA_DIR:/opt/gateway-admin/data}/gateway-admin;AUTO_SERVER=FALSE;MODE=MySQL;DATABASE_TO_UPPER=FALSE
+    username: sa
+    password: ${ADMIN_DB_PASSWORD:}
+    driver-class-name: org.h2.Driver
+  jackson:
+    default-property-inclusion: non_null
+
+gateway-admin:
+  master-key: ${ADMIN_MASTER_KEY_B64:}
+  lineage-token: ${LINEAGE_INGRESS_TOKEN:}
+  proxy:
+    host: ${PROXY_HOST:127.0.0.1}
+    port: ${PROXY_PORT:3307}
+    username: ${PROXY_ADMIN_USER:gateway_admin}
+    password: ${PROXY_ADMIN_PASSWORD:}
+
+logging:
+  level:
+    root: INFO
+    com.example.doris.gateway.admin: INFO

@@ -1,0 +1,24 @@
+# Isolated acceptance-test instance. Never use these credentials in production.
+mode:
+  type: Standalone
+  repository:
+    type: JDBC
+    props:
+      provider: H2
+      jdbc_url: jdbc:h2:file:/opt/gateway/conf/repository/config;DATABASE_TO_UPPER=false;MODE=MYSQL
+      username: sa
+      password: ''
+authority:
+  users:
+    - user: gateway_multi_control@%
+      password: CHANGE_ME_PROXY_ADMIN_PASSWORD
+      admin: true
+  privilege:
+    type: DATABASE_PERMITTED
+    props:
+      user-database-mappings: gateway_multi_control@%=bootstrap_unused
+transaction:
+  defaultType: LOCAL
+props:
+  proxy-frontend-database-protocol-type: MySQL
+  sql-show: false

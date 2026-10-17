@@ -1,0 +1,19 @@
+FROM scratch
+
+ADD rootfs.tar /
+
+ENV JAVA_HOME=/opt/java \
+    PATH=/opt/java/bin:/usr/bin \
+    GATEWAY_HOME=/opt/shardingsphere-proxy \
+    GATEWAY_CONF_DIR=/opt/gateway/conf \
+    GATEWAY_LOG_DIR=/opt/gateway/logs \
+    GATEWAY_BIND_ADDRESS=0.0.0.0 \
+    GATEWAY_PORT=3307 \
+    LANG=C.UTF-8
+
+WORKDIR /opt/shardingsphere-proxy
+EXPOSE 3307
+VOLUME ["/opt/gateway/conf", "/opt/gateway/logs"]
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD ["/usr/local/bin/gateway-healthcheck"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
+CMD ["start"]

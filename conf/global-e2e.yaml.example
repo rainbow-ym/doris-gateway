@@ -1,0 +1,35 @@
+mode:
+  type: Standalone
+  repository:
+    type: JDBC
+    props:
+      provider: H2
+      jdbc_url: jdbc:h2:file:./conf/repository/config;DATABASE_TO_UPPER=false;MODE=MYSQL
+      username: sa
+      password: ''
+
+authority:
+  users:
+    - user: gateway_test@%
+      password: CHANGE_ME_GATEWAY_PASSWORD
+  privilege:
+    type: DATABASE_PERMITTED
+    props:
+      user-database-mappings: gateway_test@%=gateway_mask_test
+
+transaction:
+  defaultType: LOCAL
+
+sqlParser:
+  sqlStatementCache:
+    initialCapacity: 128
+    maximumSize: 1024
+  parseTreeCache:
+    initialCapacity: 128
+    maximumSize: 1024
+
+props:
+  sql-show: false
+  check-table-metadata-enabled: true
+  proxy-default-port: 13307
+  proxy-frontend-database-protocol-type: MySQL

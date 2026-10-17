@@ -1,0 +1,3 @@
+com.example.doris.gateway.mask.LengthBasedMaskAlgorithm
+com.example.doris.gateway.mask.UnicodeKeepFirstLastMaskAlgorithm
+com.example.doris.gateway.mask.OutputAesGcmMaskAlgorithm

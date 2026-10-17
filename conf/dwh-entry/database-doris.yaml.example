@@ -1,0 +1,54 @@
+# Doris 数据源、路由和返回脱敏配置
+
+# 业务系统通过网关看到的逻辑数据库名称。
+databaseName: 'DWH_入口'
+
+dataSources:
+  doris_ds:
+    # Doris FE MySQL 协议地址。
+    # 如果 Doris 已启用 TLS，请把 useSSL 改成 true 并补充证书配置。
+    url: 'jdbc:mysql://192.168.200.99:9030/DWH_入口?useSSL=false&useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai'
+
+    # 网关连接 Doris 使用的真实 Doris 账号。
+    username: 'test'
+
+    # 修改为 Doris 中 test 用户的真实密码。
+    password: 'CHANGE_ME_DORIS_TEST_PASSWORD'
+
+    connectionTimeoutMilliseconds: 30000
+    idleTimeoutMilliseconds: 60000
+    maxLifetimeMilliseconds: 1800000
+    maxPoolSize: 50
+    minPoolSize: 1
+
+rules:
+  # 人口关系网表是 Doris 中的普通单表，直接路由到 doris_ds。
+  - !SINGLE
+    tables:
+      - 'doris_ds.人口关系网表'
+    defaultDataSource: doris_ds
+
+  # 查询仍使用 Doris 中的明文；只有返回业务系统的结果会脱敏。
+  - !MASK
+    tables:
+      '人口关系网表':
+        columns:
+          '证件号码':
+            maskAlgorithm: id_card_mask
+          '姓名':
+            maskAlgorithm: person_name_mask
+
+    maskAlgorithms:
+      # 15位、18位身份证保留前6后4；其他异常长度全部隐藏。
+      id_card_mask:
+        type: LENGTH_BASED_MASK
+        props:
+          rules: '15=6,4;18=6,4;*=0,0'
+          replace-char: '*'
+
+      # 单字全隐藏；两字保留姓；三字及以上保留首尾。
+      person_name_mask:
+        type: LENGTH_BASED_MASK
+        props:
+          rules: '1=0,0;2=1,0;3=1,1;*=1,1'
+          replace-char: '*'

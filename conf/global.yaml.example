@@ -1,0 +1,37 @@
+# Minimal standalone example. Replace credentials and use a secret mount in production.
+mode:
+  type: Standalone
+  repository:
+    type: JDBC
+    props:
+      provider: H2
+      jdbc_url: jdbc:h2:file:./conf/repository/config;DATABASE_TO_UPPER=false;MODE=MYSQL
+      username: sa
+      password: ''
+
+authority:
+  users:
+    # 平台控制账号，不供业务使用；密码与 admin.env 的 PROXY_ADMIN_PASSWORD 一致。
+    - user: gateway_admin@%
+      password: CHANGE_ME_PROXY_ADMIN_PASSWORD
+      admin: true
+  privilege:
+    type: DATABASE_PERMITTED
+    props:
+      user-database-mappings: gateway_admin@%=bootstrap_unused
+
+transaction:
+  defaultType: LOCAL
+
+sqlParser:
+  sqlStatementCache:
+    initialCapacity: 2000
+    maximumSize: 65535
+  parseTreeCache:
+    initialCapacity: 128
+    maximumSize: 1024
+
+props:
+  proxy-default-port: 3307
+  proxy-frontend-database-protocol-type: MySQL
+  sql-show: false

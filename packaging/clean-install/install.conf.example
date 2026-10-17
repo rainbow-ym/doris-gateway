@@ -1,0 +1,9 @@
+# 全新安装配置，不包含任何生产账号或密码。
+# 修改后另存为 install.conf；仅 root 可修改，此文件由 Bash 读取。
+INSTALL_DIR=/data/doris-gateway-clean
+INSTANCE_NAME=doris-gateway-clean
+PLATFORM_BIND_IP=0.0.0.0
+PLATFORM_PORT=18080
+WORKER_PORT=18082
+GATEWAY_BIND_IP=0.0.0.0
+GATEWAY_PORT=3308

@@ -1,0 +1,74 @@
+# ShardingSphere-Proxy 5.5.3 logical database configuration.
+# Rename to database-doris.yaml after replacing every CHANGE_ME value.
+databaseName: business_db
+
+dataSources:
+  doris_ds:
+    url: jdbc:mysql://CHANGE_ME_DORIS_FE:9030/CHANGE_ME_DATABASE?useSSL=true&useUnicode=true&characterEncoding=UTF-8
+    username: CHANGE_ME_DORIS_USER
+    password: CHANGE_ME_FROM_SECRET_MOUNT
+    connectionTimeoutMilliseconds: 30000
+    idleTimeoutMilliseconds: 60000
+    maxLifetimeMilliseconds: 1800000
+    maxPoolSize: 50
+    minPoolSize: 1
+
+rules:
+  - !SINGLE
+    tables:
+      - "*.*"
+    defaultDataSource: doris_ds
+
+  - !MASK
+    tables:
+      customer:
+        columns:
+          id_card:
+            maskAlgorithm: id_card_mask
+          name:
+            maskAlgorithm: person_name_mask
+          phone:
+            maskAlgorithm: phone_mask
+          address:
+            maskAlgorithm: address_mask
+          # Use this only when the caller must receive reversible ciphertext.
+          # The plaintext is still stored and queried in Doris.
+          secret_value:
+            maskAlgorithm: output_aes_gcm
+
+    maskAlgorithms:
+      id_card_mask:
+        type: UNICODE_KEEP_FIRST_N_LAST_M
+        props:
+          first-n: 6
+          last-m: 4
+          replace-char: '*'
+
+      person_name_mask:
+        type: LENGTH_BASED_MASK
+        props:
+          # 1 char: all hidden; 2 chars: keep surname; 3 chars: keep both ends;
+          # other lengths: keep both ends.
+          rules: '1=0,0;2=1,0;3=1,1;*=1,1'
+          replace-char: '*'
+
+      phone_mask:
+        type: UNICODE_KEEP_FIRST_N_LAST_M
+        props:
+          first-n: 3
+          last-m: 4
+          replace-char: '*'
+
+      address_mask:
+        type: UNICODE_KEEP_FIRST_N_LAST_M
+        props:
+          first-n: 6
+          last-m: 0
+          replace-char: '*'
+
+      output_aes_gcm:
+        type: OUTPUT_AES_GCM
+        props:
+          key-env: GATEWAY_OUTPUT_AES_KEY_B64
+          key-id: output-key-v1
+          aad: business_db.customer.secret_value

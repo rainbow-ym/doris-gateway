@@ -1,0 +1,21 @@
+server:
+  address: ${PLATFORM_BIND_ADDRESS:127.0.0.1}
+  port: ${PLATFORM_PORT:18080}
+  servlet:
+    session:
+      timeout: 30m
+      cookie:
+        name: GATEWAY_PLATFORM_SESSION
+        http-only: true
+        same-site: strict
+        secure: ${PLATFORM_COOKIE_SECURE:false}
+spring:
+  datasource:
+    url: jdbc:h2:file:${PLATFORM_DATA_DIR:/opt/gateway-platform/data}/platform;MODE=MySQL;DATABASE_TO_UPPER=FALSE
+    username: sa
+    password: ${PLATFORM_DB_PASSWORD:}
+  servlet:
+    multipart:
+      max-file-size: 2MB
+      max-request-size: 2MB
+server.error.include-message: never

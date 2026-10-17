@@ -1,0 +1,39 @@
+# Doris 安全网关全局配置
+# 业务系统使用 test 用户连接网关，逻辑数据库为 DWH_入口。
+
+mode:
+  type: Standalone
+  repository:
+    type: JDBC
+    props:
+      provider: H2
+      jdbc_url: jdbc:h2:file:./conf/repository/config;DATABASE_TO_UPPER=false;MODE=MYSQL
+      username: sa
+      password: ''
+
+authority:
+  users:
+    - user: 'test@%'
+      # 修改为业务系统连接网关时使用的密码。
+      password: 'CHANGE_ME_GATEWAY_PASSWORD'
+  privilege:
+    type: DATABASE_PERMITTED
+    props:
+      user-database-mappings: 'test@%=DWH_入口'
+
+transaction:
+  defaultType: LOCAL
+
+sqlParser:
+  sqlStatementCache:
+    initialCapacity: 2000
+    maximumSize: 65535
+  parseTreeCache:
+    initialCapacity: 128
+    maximumSize: 1024
+
+props:
+  proxy-default-port: 3307
+  proxy-frontend-database-protocol-type: MySQL
+  # 禁止在日志中输出带有敏感查询条件的完整 SQL。
+  sql-show: false

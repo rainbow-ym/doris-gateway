@@ -1,0 +1,60 @@
+DWH_入口 Doris 网关旧版 YAML 示例说明
+================================
+
+重要：新版本不再依赖该业务 YAML。新部署只配置 global.yaml，然后在
+浏览器管理平台中初始化 DWH_入口、注册 Storage Unit、扫描字段并批量
+发布策略。database-doris.yaml 仅保留给现有手工配置部署迁移时参考。
+
+一、必须修改的密码
+
+1. global.yaml
+   将 CHANGE_ME_GATEWAY_PASSWORD 替换为业务系统连接网关使用的密码。
+
+2. database-doris.yaml
+   将 CHANGE_ME_DORIS_TEST_PASSWORD 替换为 Doris 中 test 用户的真实密码。
+
+二、旧版手工部署（仅迁移参考）
+
+目标目录：
+  /data/doris-security-gateway/
+
+复制后的文件位置：
+  /data/doris-security-gateway/conf/global.yaml
+  /data/doris-security-gateway/conf/database-doris.yaml
+  /data/doris-security-gateway/gateway.env
+
+权限：
+  chmod 600 /data/doris-security-gateway/conf/global.yaml
+  chmod 600 /data/doris-security-gateway/conf/database-doris.yaml
+  chmod 600 /data/doris-security-gateway/gateway.env
+
+三、新版本推荐方式
+
+  先按交付包 README.md 启动管理平台和只含 global.yaml 的 Proxy，
+  再在管理页面完成逻辑库初始化与策略发布。
+
+四、旧版启动命令（仅迁移参考）
+
+  cd /data/doris-security-gateway-package
+  GATEWAY_DATA_DIR=/data/doris-security-gateway ./run-docker.sh
+
+五、业务系统连接
+
+  地址：192.168.232.132
+  端口：3307
+  数据库：DWH_入口
+  用户：test
+  密码：global.yaml 中配置的网关密码
+
+六、脱敏效果
+
+  证件号码：110101199001011234 -> 110101********1234
+  张三 -> 张*
+  李小明 -> 李*明
+  欧阳小明 -> 欧**明
+
+七、重要说明
+
+  该配置不包含 OUTPUT_AES_GCM，不需要设置 GATEWAY_OUTPUT_AES_KEY_B64。
+  查询条件仍使用 Doris 明文，因此 LIKE 模糊查询可以正常执行；返回结果由网关脱敏。
+  sql-show 只能配置在 global.yaml 中，不能写在 database-doris.yaml 顶层。

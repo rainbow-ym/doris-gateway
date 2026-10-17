@@ -1,0 +1,2 @@
+FROM doris-security-gateway-admin:multi-user-20261014
+COPY doris-security-gateway-admin-0.1.0.jar /opt/gateway-admin/app.jar

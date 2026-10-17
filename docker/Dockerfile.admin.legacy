@@ -1,0 +1,13 @@
+FROM doris-security-gateway:0.1.0
+
+COPY doris-security-gateway-admin-0.1.0.jar /opt/gateway-admin/app.jar
+
+ENV ADMIN_DATA_DIR=/opt/gateway-admin/data \
+    ADMIN_BIND_ADDRESS=127.0.0.1 \
+    ADMIN_PORT=18080
+
+WORKDIR /opt/gateway-admin
+EXPOSE 18080
+VOLUME ["/opt/gateway-admin/data"]
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD ["/usr/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${ADMIN_PORT:-18080}"]
+ENTRYPOINT ["/opt/java/bin/java", "-Dfile.encoding=UTF-8", "-jar", "/opt/gateway-admin/app.jar"]

@@ -1,0 +1,62 @@
+databaseName: gateway_mask_test
+
+dataSources:
+  doris_ds:
+    url: jdbc:mysql://127.0.0.1:9030/gateway_mask_test?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: root
+    password: CHANGE_ME_DORIS_PASSWORD
+    connectionTimeoutMilliseconds: 30000
+    idleTimeoutMilliseconds: 60000
+    maxLifetimeMilliseconds: 1800000
+    maxPoolSize: 20
+    minPoolSize: 1
+
+rules:
+  - !SINGLE
+    tables:
+      - "*.*"
+    defaultDataSource: doris_ds
+  - !MASK
+    tables:
+      customer:
+        columns:
+          id_card:
+            maskAlgorithm: id_card_mask
+          name:
+            maskAlgorithm: name_mask
+          phone:
+            maskAlgorithm: phone_mask
+          address:
+            maskAlgorithm: address_mask
+          secret_value:
+            maskAlgorithm: output_aes_gcm
+    maskAlgorithms:
+      id_card_mask:
+        type: UNICODE_KEEP_FIRST_N_LAST_M
+        props:
+          first-n: 6
+          last-m: 4
+          replace-char: '*'
+      name_mask:
+        type: LENGTH_BASED_MASK
+        props:
+          rules: "1=0,0;2=1,0;3=1,1;*=1,1"
+          replace-char: '*'
+      phone_mask:
+        type: UNICODE_KEEP_FIRST_N_LAST_M
+        props:
+          first-n: 3
+          last-m: 4
+          replace-char: '*'
+      address_mask:
+        type: UNICODE_KEEP_FIRST_N_LAST_M
+        props:
+          first-n: 6
+          last-m: 0
+          replace-char: '*'
+      output_aes_gcm:
+        type: OUTPUT_AES_GCM
+        props:
+          key-env: GATEWAY_OUTPUT_AES_KEY_B64
+          key-id: output-key-v1
+          aad: gateway_mask_test.customer.secret_value

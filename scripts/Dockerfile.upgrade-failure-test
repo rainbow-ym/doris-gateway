@@ -1,0 +1,2 @@
+FROM doris-security-gateway-admin:recovery-upgrade-test-20261016
+ENTRYPOINT ["/bin/sh", "-c", "exit 17"]
