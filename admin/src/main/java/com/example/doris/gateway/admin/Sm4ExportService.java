@@ -59,11 +59,14 @@ public class Sm4ExportService {
             for(Map<String,Object> row:originals)for(Map.Entry<String,Object> cell:row.entrySet()){
                 int index=Integer.parseInt(cell.getKey());if(index<0||index>=labels.size()||(cell.getValue()!=null&&!(cell.getValue() instanceof String)))throw new IllegalArgumentException("原值单元格格式无效。");
             }
+            validateTypes(request.get("types"),labels.size(),((Number)request.get("carrier")).intValue());
+            requireUnambiguousRows(displayed,originals);
             if(json.writeValueAsBytes(request).length>1024*1024)throw new IllegalArgumentException("导出缓冲超过 1 MiB，请缩小查询范围。");
             Map<String,Object> payload=new LinkedHashMap<>();String id=UUID.randomUUID().toString();long expires=System.currentTimeMillis()+((Number)policy.get("ttlMinutes")).longValue()*60000;
             payload.put("id",id);payload.put("username",user);payload.put("database",db);payload.put("expires",expires);payload.put("epoch",account.get("epoch"));
             payload.put("labels",labels);payload.put("originals",originals);payload.put("sources",bindSources(sources,false));payload.put("rows",displayed.size());
             payload.put("digest",digest(labels,displayed));payload.put("carrier",request.get("carrier"));
+            payload.put("types",request.get("types"));
             String envelope=Sm4ExportCodec.encrypt(json.writeValueAsBytes(payload),currentKey,key(currentKey));
             if(envelope.length()>30000)throw new IllegalArgumentException("SM4 密文超过单元格 30000 字符上限，请减少查询行数。");
             String packet=envelope.substring(envelope.lastIndexOf(':')+1);
@@ -91,9 +94,11 @@ public class Sm4ExportService {
             if(!Objects.equals(String.valueOf(account.get("epoch")),String.valueOf(p.get("epoch"))))throw new SecurityException("原账号凭据版本已变化，拒绝解密旧文件。");
             if(((Number)p.get("carrier")).intValue()!=carrier||!labels.equals(p.get("labels"))||((Number)p.get("rows")).intValue()!=rows.size()||!digest(labels,rows).equals(p.get("digest")))
                 throw new IllegalArgumentException("文件与原结果不一致：可能被排序、删行、改值、改列或格式转换；拒绝猜测还原。");
-            List<Map<String,String>> sources=(List<Map<String,String>>)p.get("sources");bindSources(sources,true);
+            List<Map<String,String>> sources=bindSources((List<Map<String,String>>)p.get("sources"),true);
             checkPermissions(account,sources);
             List<Map<String,Object>> originals=(List<Map<String,Object>>)p.get("originals");
+            // Also reject ambiguous files captured by an older worker.
+            requireUnambiguousRows(rows,originals);
             for(int r=0;r<rows.size();r++)for(Map.Entry<String,Object> entry:originals.get(r).entrySet())rows.get(r).set(Integer.parseInt(entry.getKey()),entry.getValue()==null?"":String.valueOf(entry.getValue()));
             rows.add(0,labels);String output=ExportCsv.write(rows);
             store.audit("SM4_EXPORT_DECRYPTED","id="+id+",administrator="+administrator+",sourceUser="+user);
@@ -111,18 +116,38 @@ public class Sm4ExportService {
             if(!"ACTIVE".equals(object.get("status")))throw new SecurityException("来源表当前不可用，拒绝解密或捕获。");
             String generation=String.valueOf(object.get("generation_id")),identity=identities.identity(connection,physical,source.get("table"));
             if(verify&&(!generation.equals(source.get("generation"))||!identity.equals(source.get("physicalIdentity"))))throw new SecurityException("来源表已删除、改名或同名重建，旧文件不可解密。");
-            Map<String,String> bound=new LinkedHashMap<>(source);bound.put("generation",generation);bound.put("physicalIdentity",identity);result.add(bound);
+            if(verify&&source.containsKey("physicalDatabase")&&!physical.equals(source.get("physicalDatabase")))throw new SecurityException("来源库映射已变化，旧文件不可解密。");
+            Map<String,String> bound=new LinkedHashMap<>(source);bound.put("generation",generation);bound.put("physicalIdentity",identity);bound.put("physicalDatabase",physical);result.add(bound);
         }
         return result;
     }
     private void checkPermissions(Map<String,Object> account,List<Map<String,String>> sources)throws Exception {
         try(Connection c=DriverManager.getConnection(String.valueOf(account.get("url")),String.valueOf(account.get("username")),String.valueOf(account.get("password")))){
             for(Map<String,String> source:sources)try(Statement s=c.createStatement()){
-                s.setQueryTimeout(5);try(ResultSet ignored=s.executeQuery("SELECT "+quote(source.get("column"))+" FROM "+quote(source.get("database"))+"."+quote(source.get("table"))+" WHERE 1=0")){ }
+                String physical=source.get("physicalDatabase");
+                s.setQueryTimeout(5);try(ResultSet ignored=s.executeQuery("SELECT "+quote(source.get("column"))+" FROM "+quote(physical)+"."+quote(source.get("table"))+" WHERE 1=0")){ }
             }
         }
     }
     private static String quote(String s){if(s==null||s.isEmpty()||s.length()>255)throw new IllegalArgumentException("来源名称无效。");return "`"+s.replace("`","``")+"`";}
+    private static void requireUnambiguousRows(List<List<String>> rows,List<Map<String,Object>> originals){
+        Map<List<String>,Map<String,Object>> seen=new HashMap<>();
+        for(int i=0;i<rows.size();i++){
+            Map<String,Object> previous=seen.putIfAbsent(rows.get(i),originals.get(i));
+            if(previous!=null&&!previous.equals(originals.get(i)))throw new IllegalArgumentException("存在脱敏后相同但原值不同的行，无法验证行对应关系；请在查询中包含稳定唯一标识。");
+        }
+    }
+    private static void validateTypes(Object supplied,int columns,int carrier){
+        if(!(supplied instanceof List)||((List<?>)supplied).size()!=columns)throw new IllegalArgumentException("缺少完整结果列类型，请同步升级 Proxy 和管理端。");
+        List<?> types=(List<?>)supplied;
+        for(int i=0;i<types.size();i++){
+            Object value=types.get(i);if(!(value instanceof Integer))throw new IllegalArgumentException("结果列类型无效。");
+            int t=(Integer)value;
+            boolean text=t==Types.CHAR||t==Types.VARCHAR||t==Types.LONGVARCHAR||t==Types.NCHAR||t==Types.NVARCHAR||t==Types.LONGNVARCHAR;
+            boolean numeric=t==Types.TINYINT||t==Types.SMALLINT||t==Types.INTEGER||t==Types.BIGINT||t==Types.NUMERIC||t==Types.DECIMAL;
+            if((!text&&!numeric)||(i==carrier&&!text))throw new IllegalArgumentException("结果列或密文承载列类型不支持。");
+        }
+    }
     public List<Map<String,Object>> receipts(){return jdbc.queryForList("SELECT id,username,database_name AS databaseName,expires_at AS expiresAt,revoked,row_count AS rowCount FROM sm4_export_receipts ORDER BY expires_at DESC LIMIT 100");}
     public void revoke(String id){jdbc.update("UPDATE sm4_export_receipts SET revoked=TRUE WHERE id=?",id);store.audit("SM4_EXPORT_REVOKED","id="+id);}
     private String digest(List<String> labels,List<List<String>> rows)throws Exception{return Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(json.writeValueAsBytes(Arrays.asList(labels,rows))));}

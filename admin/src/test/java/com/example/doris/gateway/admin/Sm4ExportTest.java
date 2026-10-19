@@ -28,6 +28,7 @@ class Sm4ExportTest {
  Map<String,Object> profile(boolean decrypt){Map<String,Object> p=new LinkedHashMap<>();p.put("username","user");p.put("databaseName","db");p.put("enabled",true);p.put("allowDecrypt",decrypt);p.put("maxRows",2);return p;}
  Map<String,Object> request(){
   Map<String,Object> p=new LinkedHashMap<>();p.put("username","user");p.put("database","db");p.put("labels",Arrays.asList("证件号码","备注"));p.put("displayed",Collections.singletonList(Arrays.asList("110101********1234","含,逗号\n和\"引号")));
+  p.put("types",Arrays.asList(java.sql.Types.VARCHAR,java.sql.Types.VARCHAR));
   p.put("originals",Collections.singletonList(Collections.singletonMap("0","110101199001011234")));p.put("carrier",0);
   Map<String,String> source=new LinkedHashMap<>();source.put("database","PUBLIC");source.put("table","src");source.put("column","secret");p.put("sources",Collections.singletonList(source));return p;
  }
@@ -71,5 +72,54 @@ class Sm4ExportTest {
   jdbc.update("UPDATE sm4_export_receipts SET expires_at=0");assertThrows(SecurityException.class,()->service.decrypt(csv(token),"admin"));
   String fresh=(String)service.capture(request()).get("envelope");jdbc.update("UPDATE managed_objects SET generation_id='replacement'");
   assertThrows(SecurityException.class,()->service.decrypt(csv(fresh),"admin"));
+ }
+ @Test void csvLimitsAlsoApplyWithoutFinalNewline(){
+  assertThrows(IllegalArgumentException.class,()->ExportCsv.parse(String.join(",",Collections.nCopies(257,"x"))));
+  assertThrows(IllegalArgumentException.class,()->ExportCsv.parse(String.join("\n",Collections.nCopies(1003,"x"))));
+  assertThrows(IllegalArgumentException.class,()->ExportCsv.parse(String.join("",Collections.nCopies(400000,"中"))));
+ }
+ @Test void ambiguousMaskedDuplicatesAreRejectedBeforeCapture()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();
+  r.put("displayed",Arrays.asList(Arrays.asList("same","same"),Arrays.asList("same","same")));
+  r.put("originals",Arrays.asList(Collections.singletonMap("0","first"),Collections.singletonMap("0","second")));
+  assertThrows(IllegalArgumentException.class,()->service.capture(r));assertTrue(service.receipts().isEmpty());
+ }
+ @Test void columnTypesAreRequiredAndAuthenticated()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();r.remove("types");
+  assertThrows(IllegalArgumentException.class,()->service.capture(r));
+  final Map<String,Object> invalid=request();invalid.put("types",Arrays.asList(java.sql.Types.INTEGER,java.sql.Types.VARCHAR));
+  assertThrows(IllegalArgumentException.class,()->service.capture(invalid));
+  String envelope=(String)service.capture(request()).get("envelope");
+  Map<?,?> payload=new ObjectMapper().readValue(Sm4ExportCodec.decrypt(envelope,key),Map.class);
+  assertEquals(request().get("types"),payload.get("types"));
+ }
+ @Test void logicalAliasUsesPhysicalDatabaseForPermissionCheck()throws Exception{
+  jdbc.update("UPDATE logical_databases SET logical_name='alias' WHERE logical_name='PUBLIC'");
+  service.save(profile(true));Map<String,Object> r=request();
+  Map<String,String> source=new LinkedHashMap<>();source.put("database","alias");source.put("table","src");source.put("column","secret");r.put("sources",Collections.singletonList(source));
+  String envelope=(String)service.capture(r).get("envelope");
+  assertTrue(((String)service.decrypt(csv(envelope),"admin").get("csv")).contains("110101199001011234"));
+ }
+ @Test void oversizedRowsAndCiphertextNeverProduceReceipt()throws Exception{
+  service.save(profile(true));Map<String,Object> tooMany=request();
+  tooMany.put("displayed",Collections.nCopies(3,Arrays.asList("x","y")));
+  tooMany.put("originals",Collections.nCopies(3,Collections.singletonMap("0","secret")));
+  assertThrows(IllegalArgumentException.class,()->service.capture(tooMany));
+  Map<String,Object> tooLong=request();tooLong.put("originals",Collections.singletonList(Collections.singletonMap("0",String.join("",Collections.nCopies(30000,"x")))));
+  assertThrows(IllegalArgumentException.class,()->service.capture(tooLong));assertTrue(service.receipts().isEmpty());
+ }
+ @Test void currentDatabasePermissionsAreCheckedAgain()throws Exception{
+  service.save(profile(true));String envelope=(String)service.capture(request()).get("envelope");
+  jdbc.execute("CREATE USER limited PASSWORD 'test-password'");
+  account.put("username","limited");account.put("password","test-password");
+  assertThrows(java.sql.SQLException.class,()->service.decrypt(csv(envelope),"admin"));
+ }
+ @Test void identicalDuplicatesWithSameOriginalRemainSupported()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();
+  r.put("displayed",Collections.nCopies(2,Arrays.asList("x","y")));
+  r.put("originals",Collections.nCopies(2,Collections.singletonMap("0","secret")));
+  String envelope=(String)service.capture(r).get("envelope");
+  String output=(String)service.decrypt("证件号码,备注\r\nx,y\r\nx,y\r\n"+envelope+",\r\n","admin").get("csv");
+  assertEquals(3,ExportCsv.parse(output).size());
  }
 }

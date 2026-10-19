@@ -31,9 +31,9 @@ public final class Sm4ExportRows {
     }
     private static Sm4ExportRows collect(MaskMergedResult merged,List<QueryHeader> headers,String user,String db,int maxRows)throws Exception {
         if(headers.size()>256)throw new SQLException("末行加密最多支持 256 列。");
-        List<String> labels=new ArrayList<>();int carrier=-1;
+        List<String> labels=new ArrayList<>();List<Integer> types=new ArrayList<>();int carrier=-1;
         for(int i=0;i<headers.size();i++){
-            QueryHeader h=headers.get(i);labels.add(h.getColumnLabel());int t=h.getColumnType();
+            QueryHeader h=headers.get(i);labels.add(h.getColumnLabel());int t=h.getColumnType();types.add(t);
             boolean text=t==Types.CHAR||t==Types.VARCHAR||t==Types.LONGVARCHAR||t==Types.NCHAR||t==Types.NVARCHAR||t==Types.LONGNVARCHAR;
             boolean number=t==Types.TINYINT||t==Types.SMALLINT||t==Types.INTEGER||t==Types.BIGINT||t==Types.NUMERIC||t==Types.DECIMAL;
             if(!text&&!number)throw new SQLException("末行加密当前仅支持文本、整数和定点数列；请缩小查询字段范围。");
@@ -52,6 +52,7 @@ public final class Sm4ExportRows {
             buffered.add(data);displayed.add(view);originals.add(original);
         }
         Map<String,Object> request=new LinkedHashMap<>();request.put("username",user);request.put("database",db);request.put("labels",labels);request.put("displayed",displayed);request.put("originals",originals);request.put("sources",merged.exportSources());request.put("carrier",carrier);
+        request.put("types",types);
         String encoded=JSON.writeValueAsString(request);if(encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>1024*1024)throw new SQLException("末行加密请求超过 1 MiB。");
         Map<?,?> response=JSON.readValue(LineageEventEmitter.captureExport(encoded),Map.class);String envelope=String.valueOf(response.get("envelope"));
         if(!envelope.startsWith("__GW_SM4_V1__:")||envelope.length()>30000)throw new SQLException("控制面未返回有效 SM4 附件。");
