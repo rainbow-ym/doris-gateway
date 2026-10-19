@@ -20,6 +20,12 @@ public final class LineageEventEmitter {
     private static final String TOKEN = environment("GATEWAY_LINEAGE_TOKEN");
     private static final int TIMEOUT_MILLIS = integerEnvironment("GATEWAY_LINEAGE_TIMEOUT_MS", 5000);
     private static final boolean FAIL_CLOSED = Boolean.parseBoolean(environment("GATEWAY_LINEAGE_FAIL_CLOSED", "true"));
+    private static final AuditOutbox AUDIT_OUTBOX = new AuditOutbox(java.nio.file.Paths.get(environment("GATEWAY_AUDIT_OUTBOX_DIR","/opt/gateway/logs/audit-outbox")),
+            payload -> post(CONTROL_ENDPOINT+"/audit",payload,true));
+    static {
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"gateway-audit-retry");t.setDaemon(true);return t;})
+                .scheduleWithFixedDelay(AUDIT_OUTBOX::retry,10,10,java.util.concurrent.TimeUnit.SECONDS);
+    }
 
     private LineageEventEmitter() {
     }
@@ -29,11 +35,19 @@ public final class LineageEventEmitter {
         requireToken();
         return post(CONTROL_ENDPOINT + "/" + operation, '{' + field("username", username) + ',' + field("database", database) + '}');
     }
+    public static String captureExport(final String payload) {
+        if(CONTROL_ENDPOINT.isEmpty())throw new IllegalStateException("缺少加密导出控制接口。");
+        java.net.URI uri=java.net.URI.create(CONTROL_ENDPOINT);
+        if(!"https".equalsIgnoreCase(uri.getScheme())&&!("http".equalsIgnoreCase(uri.getScheme())&&java.util.Arrays.asList("127.0.0.1","localhost","[::1]","::1").contains(uri.getHost())))
+            throw new IllegalStateException("原值加密传输仅允许本机回环 HTTP 或 HTTPS 控制接口。");
+        requireToken();
+        return post(CONTROL_ENDPOINT+"/export-capture",payload,true);
+    }
 
     public static void auditExecution(final String username, final String database, final String sql, final String outcome, final String requestId) {
         if(TOKEN.length()<24)throw new IllegalStateException("审计控制凭据未正确配置，拒绝执行。");
-        post(CONTROL_ENDPOINT + "/audit", '{' + field("username", username) + ',' + field("database", database)
-                + ',' + field("sqlDigest", sha256(sql)) + ',' + field("outcome", outcome) + ',' + field("requestId", requestId) + '}',true);
+        AUDIT_OUTBOX.record(requestId,outcome,'{' + field("username", username) + ',' + field("database", database)
+                + ',' + field("sqlDigest", sha256(sql)) + ',' + field("outcome", outcome) + ',' + field("requestId", requestId) + '}');
     }
 
     public static PreparedExecution prepareExecution(final String storageUnit, final String sql) {
@@ -123,13 +137,13 @@ public final class LineageEventEmitter {
             String response = read(status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream());
             if (status < 200 || status >= 300) {
                 String message = jsonValue(response, "message");
-                if(strict)throw new IllegalStateException("审计接口未确认，HTTP "+status);
+                if(strict)throw new IllegalStateException(endpoint.endsWith("/export-capture")&&!message.isEmpty()?message:"控制接口未确认，HTTP "+status);
                 fail(message.isEmpty() ? "Gateway control endpoint returned HTTP " + status : message, null);
             }
             return response;
         } catch (final Exception ex) {
             if (ex instanceof IllegalStateException) throw (IllegalStateException) ex;
-            if(strict)throw new IllegalStateException("审计接口无法确认。",ex);
+            if(strict)throw new IllegalStateException("控制接口无法确认。",ex);
             fail("Unable to reach gateway management control plane.", ex);
             return "";
         } finally {

@@ -31,6 +31,7 @@ public class AdminStore {
         jdbc.execute("CREATE TABLE IF NOT EXISTS metadata_columns (id BIGINT AUTO_INCREMENT PRIMARY KEY, connection_id BIGINT NOT NULL, database_name VARCHAR(255) NOT NULL, table_name VARCHAR(255) NOT NULL, column_name VARCHAR(255) NOT NULL, data_type VARCHAR(128), column_comment VARCHAR(2048), recommended_policy VARCHAR(64), assigned_policy VARCHAR(64), status VARCHAR(32) NOT NULL DEFAULT 'UNCONFIRMED', updated_at VARCHAR(64) NOT NULL, UNIQUE(connection_id,database_name,table_name,column_name))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS publish_versions (id BIGINT AUTO_INCREMENT PRIMARY KEY, database_name VARCHAR(255) NOT NULL, before_json CLOB NOT NULL, desired_json CLOB NOT NULL, statements_json CLOB NOT NULL, status VARCHAR(32) NOT NULL, message CLOB, created_at VARCHAR(64) NOT NULL)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS audit_log (id BIGINT AUTO_INCREMENT PRIMARY KEY, action VARCHAR(64) NOT NULL, detail CLOB, created_at VARCHAR(64) NOT NULL)");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS audit_receipts (request_id VARCHAR(64) NOT NULL,outcome VARCHAR(32) NOT NULL,detail CLOB NOT NULL,PRIMARY KEY(request_id,outcome))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS logical_databases (id BIGINT AUTO_INCREMENT PRIMARY KEY, connection_id BIGINT NOT NULL, logical_name VARCHAR(255) NOT NULL UNIQUE, physical_database VARCHAR(255) NOT NULL, storage_unit VARCHAR(128) NOT NULL, status VARCHAR(32) NOT NULL, message CLOB, updated_at VARCHAR(64) NOT NULL)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS lineage_events (id BIGINT AUTO_INCREMENT PRIMARY KEY, event_id VARCHAR(64) NOT NULL UNIQUE, event_type VARCHAR(32) NOT NULL, logical_database VARCHAR(255), statement_type VARCHAR(64), sql_digest VARCHAR(128), payload CLOB NOT NULL, created_at VARCHAR(64) NOT NULL)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS lineage_edges (id BIGINT AUTO_INCREMENT PRIMARY KEY, event_id VARCHAR(64) NOT NULL, source_database VARCHAR(255), source_table VARCHAR(255), source_column VARCHAR(255), target_database VARCHAR(255), target_table VARCHAR(255), target_column VARCHAR(255), transform_type VARCHAR(64), inherited_policy VARCHAR(64), created_at VARCHAR(64) NOT NULL)");
@@ -38,6 +39,15 @@ public class AdminStore {
         jdbc.execute("CREATE TABLE IF NOT EXISTS managed_columns (id BIGINT AUTO_INCREMENT PRIMARY KEY, connection_id BIGINT NOT NULL, database_name VARCHAR(255) NOT NULL, table_name VARCHAR(255) NOT NULL, column_name VARCHAR(255) NOT NULL, ordinal_position INT NOT NULL, data_type VARCHAR(128), status VARCHAR(32) NOT NULL, updated_at VARCHAR(64) NOT NULL, UNIQUE(connection_id,database_name,table_name,column_name))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS managed_sql_executions (id BIGINT AUTO_INCREMENT PRIMARY KEY, execution_id VARCHAR(64) NOT NULL UNIQUE, connection_id BIGINT NOT NULL, storage_unit VARCHAR(128) NOT NULL, logical_database VARCHAR(255) NOT NULL, physical_database VARCHAR(255) NOT NULL, statement_type VARCHAR(64) NOT NULL, target_table VARCHAR(255), rename_target_table VARCHAR(255), raw_sql CLOB NOT NULL, status VARCHAR(32) NOT NULL, message CLOB, created_at VARCHAR(64) NOT NULL, updated_at VARCHAR(64) NOT NULL)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS managed_registry_meta (meta_key VARCHAR(64) PRIMARY KEY, meta_value VARCHAR(255) NOT NULL)");
+        jdbc.execute("ALTER TABLE managed_objects ADD COLUMN IF NOT EXISTS generation_id VARCHAR(64)");
+        jdbc.execute("ALTER TABLE managed_sql_executions ADD COLUMN IF NOT EXISTS target_generation VARCHAR(64)");
+        jdbc.execute("ALTER TABLE managed_sql_executions ADD COLUMN IF NOT EXISTS rename_generation VARCHAR(64)");
+        jdbc.execute("ALTER TABLE managed_sql_executions ADD COLUMN IF NOT EXISTS success_received BOOLEAN NOT NULL DEFAULT FALSE");
+        jdbc.execute("ALTER TABLE managed_sql_executions ADD COLUMN IF NOT EXISTS recovery_attempts INT NOT NULL DEFAULT 0");
+        jdbc.execute("ALTER TABLE managed_sql_executions ADD COLUMN IF NOT EXISTS rename_registry_applied BOOLEAN NOT NULL DEFAULT FALSE");
+        jdbc.execute("ALTER TABLE managed_sql_executions ADD COLUMN IF NOT EXISTS rename_policy_version BIGINT NOT NULL DEFAULT 0");
+        for(Long id:jdbc.queryForList("SELECT id FROM managed_objects WHERE generation_id IS NULL",Long.class))
+            jdbc.update("UPDATE managed_objects SET generation_id=? WHERE id=? AND generation_id IS NULL",java.util.UUID.randomUUID().toString(),id);
         migrateExistingManagedMetadata();
         jdbc.execute("CREATE TABLE IF NOT EXISTS onboarding_jobs (id VARCHAR(64) PRIMARY KEY, connection_id BIGINT NOT NULL, database_name VARCHAR(255) NOT NULL, status VARCHAR(32) NOT NULL, stage VARCHAR(64), message CLOB, updated_at VARCHAR(64) NOT NULL)");
         jdbc.update("UPDATE onboarding_jobs SET status='FAILED',message='服务重启中断了接入，请点击重试；已完成的步骤将自动复用。' WHERE status IN ('QUEUED','RUNNING')");
@@ -57,6 +67,18 @@ public class AdminStore {
             }
         }
         jdbc.update("INSERT INTO managed_registry_meta(meta_key,meta_value) VALUES('legacy_metadata_migrated',?)", Instant.now().toString());
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    public void recordExecutionAudit(String requestId,String outcome,String detail) {
+        if(requestId.isEmpty()){audit("USER_SQL_"+outcome,detail);return;}
+        List<String> previous=jdbc.queryForList("SELECT detail FROM audit_receipts WHERE request_id=? AND outcome=?",String.class,requestId,outcome);
+        if(!previous.isEmpty()) {
+            if(!previous.get(0).equals(detail))throw new IllegalArgumentException("审计编号内容冲突，拒绝覆盖。");
+            return;
+        }
+        jdbc.update("INSERT INTO audit_receipts(request_id,outcome,detail) VALUES(?,?,?)",requestId,outcome,detail);
+        audit("USER_SQL_"+outcome,detail);
     }
 
     public synchronized long saveConnection(final Map<String, Object> request) {
@@ -240,8 +262,14 @@ public class AdminStore {
         audit("MANAGED_DATABASE_ACTIVATED", "connectionId=" + connectionId + ",database=" + database + ",tables=" + tables.size());
     }
 
+    @org.springframework.transaction.annotation.Transactional
     public void upsertManagedObject(final long connectionId, final String database, final String table, final String objectType,
                                     final String status, final String executionId, final String message) {
+        List<Map<String,Object>> locked=jdbc.queryForList("SELECT * FROM managed_objects WHERE connection_id=? AND LOWER(database_name)=LOWER(?) AND LOWER(table_name)=LOWER(?) FOR UPDATE",connectionId,database,table);
+        Map<String,Object> previous=locked.isEmpty()?Collections.emptyMap():locked.get(0);
+        Object owner=previous.get("pending_execution_id");
+        if(owner!=null&&!String.valueOf(owner).isEmpty()&&!java.util.Objects.equals(owner,executionId))
+            throw new IllegalStateException("对象仍由未完成任务占用，不能重新接入或覆盖："+table);
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM managed_objects WHERE connection_id=? AND database_name=? AND table_name=?",
                 Integer.class, connectionId, database, table);
         String fingerprint = schemaFingerprint(connectionId, database, table);
@@ -252,6 +280,8 @@ public class AdminStore {
             jdbc.update("INSERT INTO managed_objects(connection_id,database_name,table_name,object_type,status,schema_fingerprint,policy_version,pending_execution_id,last_error,updated_at) VALUES(?,?,?,?,?,?,0,?,?,?)",
                     connectionId, database, table, objectType, status, fingerprint, executionId, message, Instant.now().toString());
         }
+        if(previous.isEmpty()||("PREPARED".equals(status)&&!java.util.Objects.equals(owner,executionId)))
+            jdbc.update("UPDATE managed_objects SET generation_id=? WHERE connection_id=? AND database_name=? AND table_name=?",java.util.UUID.randomUUID().toString(),connectionId,database,table);
     }
 
     public Map<String, Object> managedObject(final long connectionId, final String database, final String table) {
@@ -294,6 +324,96 @@ public class AdminStore {
         jdbc.update("INSERT INTO managed_sql_executions(execution_id,connection_id,storage_unit,logical_database,physical_database,statement_type,target_table,rename_target_table,raw_sql,status,message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 executionId, connectionId, storageUnit, logicalDatabase, physicalDatabase, statementType, targetTable, renameTargetTable,
                 sql, status, "", Instant.now().toString(), Instant.now().toString());
+        jdbc.update("UPDATE managed_sql_executions SET target_generation=?,rename_generation=? WHERE execution_id=?",
+                managedObject(connectionId,physicalDatabase,targetTable).get("generation_id"),
+                managedObject(connectionId,physicalDatabase,renameTargetTable).get("generation_id"),executionId);
+    }
+
+    /** Object reservation and durable work record must either both exist or neither exist. */
+    @org.springframework.transaction.annotation.Transactional
+    public void reserveManagedExecution(String id,long connectionId,String unit,String logical,String database,String type,String table,String renamed,String sql,String objectType) {
+        if(type.startsWith("CREATE")||"CTAS".equals(type)) {
+            Map<String,Object> current=managedObject(connectionId,database,table);
+            if(!current.isEmpty()&&"ACTIVE".equals(current.get("status")))type="NOOP";
+            else upsertManagedObject(connectionId,database,table,objectType,"PREPARED",id,"已预留对象，等待数据库执行确认。");
+        } else if(!"NOOP".equals(type)) {
+            setObjectStatus(connectionId,database,table,"SYNCING",id,"任务执行及保护同步中。");
+            if("RENAME".equals(type)) {
+                Map<String,Object> current=managedObject(connectionId,database,renamed);
+                if(!current.isEmpty()&&!"DROPPED".equals(current.get("status"))&&!"FAILED".equals(current.get("status")))
+                    throw new IllegalStateException("改名目标已存在或被占用。");
+                upsertManagedObject(connectionId,database,renamed,"TABLE","PREPARED",id,"已预留改名目标。");
+            }
+        }
+        saveManagedExecution(id,connectionId,unit,logical,database,type,table,renamed,sql,"PREPARED");
+    }
+
+    public void requireExecutionOwner(String id) {
+        Map<String,Object> e=managedExecution(id);
+        if("NOOP".equals(e.get("statement_type")))return;
+        long connection=((Number)e.get("connection_id")).longValue();String db=String.valueOf(e.get("physical_database"));
+        if(Boolean.TRUE.equals(e.get("rename_registry_applied"))) {
+            Map<String,Object> renamed=managedObject(connection,db,String.valueOf(e.get("rename_target_table")));
+            if(managedObject(connection,db,String.valueOf(e.get("target_table"))).isEmpty()
+                    &&java.util.Objects.equals(e.get("target_generation"),renamed.get("generation_id"))&&id.equals(renamed.get("pending_execution_id")))return;
+            updateManagedExecution(id,"STALE_EXECUTION","改名后对象归属变化，旧任务已隔离。");
+            throw new IllegalStateException("改名任务不再拥有目标对象，禁止恢复。");
+        }
+        for(String prefix:new String[]{"target","rename"}) {
+            String table=String.valueOf(e.get(prefix.equals("target")?"target_table":"rename_target_table"));
+            if(table.isEmpty()||"null".equals(table))continue;
+            Map<String,Object> object=managedObject(connection,db,table);
+            Object expected=e.get(prefix+"_generation");
+            if(expected==null||!expected.equals(object.get("generation_id"))||!id.equals(object.get("pending_execution_id"))) {
+                updateManagedExecution(id,"STALE_EXECUTION","对象代次或任务归属已变化，旧任务已隔离，不修改当前对象。");
+                throw new IllegalStateException("旧任务不再拥有当前对象，已拒绝恢复："+id);
+            }
+        }
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    public void acknowledgeExecution(String id) {
+        requireExecutionOwner(id);
+        if(jdbc.update("UPDATE managed_sql_executions SET success_received=TRUE,status='SYNCING',recovery_attempts=recovery_attempts+1,updated_at=? WHERE execution_id=? AND status IN ('PREPARED','SYNCING','FAILED')",Instant.now().toString(),id)!=1)
+            throw new IllegalStateException("执行状态已变化，不能记录成功确认。");
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    public void finishOwnedExecution(String id,String state,String message) {
+        // Only release rows still owned by this execution; never upsert by an old table name.
+        Map<String,Object> e=managedExecution(id);
+        String generation=String.valueOf(e.get("target_generation"));
+        List<Map<String,Object>> owned=jdbc.queryForList("SELECT * FROM managed_objects WHERE pending_execution_id=? FOR UPDATE",id);
+        if(owned.isEmpty()&&!"NOOP".equals(e.get("statement_type")))throw new IllegalStateException("任务已失去对象归属，拒绝修改状态。");
+        for(Map<String,Object> object:owned) {
+            if(!generation.equals(object.get("generation_id"))&&!java.util.Objects.equals(e.get("rename_generation"),object.get("generation_id")))
+                throw new IllegalStateException("对象代次不匹配，拒绝完成旧任务。");
+            String objectState="COMMITTED".equals(state)?("DROP".equals(e.get("statement_type"))?"DROPPED":"ACTIVE"):
+                    ("ABORTED".equals(state)&&!"CTAS".equals(e.get("statement_type"))&&!String.valueOf(e.get("statement_type")).startsWith("CREATE")&&generation.equals(object.get("generation_id"))?"ACTIVE":"FAILED");
+            boolean release="COMMITTED".equals(state)||"ABORTED".equals(state);
+            jdbc.update("UPDATE managed_objects SET status=?,pending_execution_id=?,last_error=?,updated_at=? WHERE id=? AND generation_id=? AND pending_execution_id=?",
+                    objectState,release?null:id,message,Instant.now().toString(),object.get("id"),object.get("generation_id"),id);
+            jdbc.update("UPDATE managed_columns SET status=? WHERE connection_id=? AND database_name=? AND table_name=?",objectState,object.get("connection_id"),object.get("database_name"),object.get("table_name"));
+        }
+        updateManagedExecution(id,state,message);
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    public void completeOwnedExecution(String id,String message,Runnable projectPermissions) {
+        finishOwnedExecution(id,"COMMITTED",message);
+        projectPermissions.run();
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    public void applyRenameRegistry(String id) {
+        requireExecutionOwner(id);
+        Map<String,Object> e=managedExecution(id);
+        if(Boolean.TRUE.equals(e.get("rename_registry_applied")))return;
+        long connection=((Number)e.get("connection_id")).longValue();
+        String db=String.valueOf(e.get("physical_database")),from=String.valueOf(e.get("target_table")),to=String.valueOf(e.get("rename_target_table"));
+        renameTable(connection,db,from,to);
+        renameManagedObject(connection,db,from,to,id);
+        jdbc.update("UPDATE managed_sql_executions SET rename_registry_applied=TRUE WHERE execution_id=?",id);
     }
 
     public Map<String, Object> managedExecution(final String executionId) {
@@ -327,7 +447,7 @@ public class AdminStore {
                                     final String executionId) {
         jdbc.update("DELETE FROM managed_objects WHERE connection_id=? AND database_name=? AND table_name=?", connectionId, database, newTable);
         jdbc.update("DELETE FROM managed_columns WHERE connection_id=? AND database_name=? AND table_name=?", connectionId, database, newTable);
-        jdbc.update("UPDATE managed_objects SET table_name=?,status='ACTIVE',pending_execution_id=NULL,last_error=NULL,updated_at=? WHERE connection_id=? AND database_name=? AND table_name=?",
+        jdbc.update("UPDATE managed_objects SET table_name=?,status='SYNCING',last_error=NULL,updated_at=? WHERE connection_id=? AND database_name=? AND table_name=?",
                 newTable, Instant.now().toString(), connectionId, database, oldTable);
         jdbc.update("UPDATE managed_columns SET table_name=?,status='ACTIVE',updated_at=? WHERE connection_id=? AND database_name=? AND table_name=?",
                 newTable, Instant.now().toString(), connectionId, database, oldTable);
@@ -335,7 +455,8 @@ public class AdminStore {
     }
 
     public void dropManagedObject(final long connectionId, final String database, final String table, final String executionId) {
-        setObjectStatus(connectionId, database, table, "DROPPED", null, "Dropped by execution " + executionId);
+        Map<String,Object> current=managedObject(connectionId,database,table);
+        setObjectStatus(connectionId, database, table, "DROPPED",current.get("pending_execution_id")==null?null:executionId, "Dropped by execution " + executionId);
         audit("MANAGED_OBJECT_DROPPED", "database=" + database + ",table=" + table + ",executionId=" + executionId);
     }
 

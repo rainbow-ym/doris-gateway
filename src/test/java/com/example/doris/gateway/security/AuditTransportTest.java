@@ -27,6 +27,7 @@ class AuditTransportTest {
             builder.environment().put("GATEWAY_CONTROL_ENDPOINT","http://127.0.0.1:"+server.getAddress().getPort());
             builder.environment().put("GATEWAY_LINEAGE_TOKEN","synthetic-test-token-not-a-secret");
             builder.environment().put("GATEWAY_LINEAGE_FAIL_CLOSED","false");
+            builder.environment().put("GATEWAY_AUDIT_OUTBOX_DIR",java.nio.file.Files.createTempDirectory("audit-transport-").toString());
             process=builder.inheritIO().start();assertTrue(process.waitFor(20,TimeUnit.SECONDS));
             assertEquals(0,process.exitValue());assertEquals(2,requests.get());
         } finally {if(process!=null&&process.isAlive())process.destroyForcibly();server.stop(0);}

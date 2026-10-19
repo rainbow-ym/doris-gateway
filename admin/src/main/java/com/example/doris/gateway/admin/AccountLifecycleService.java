@@ -22,7 +22,10 @@ public class AccountLifecycleService {
  @PostConstruct public void initialize(){
   jdbc.execute("CREATE TABLE IF NOT EXISTS account_lifecycle_tasks(id VARCHAR(36) PRIMARY KEY,actor VARCHAR(128),username VARCHAR(128),operation VARCHAR(32),source_id BIGINT,password_enc CLOB,status VARCHAR(32),message VARCHAR(1024),created_at VARCHAR(64),updated_at VARCHAR(64))");
   jdbc.update("UPDATE account_lifecycle_tasks SET status='UNKNOWN',message='服务中断，数据库执行结果待核实；禁止自动重放 SQL。' WHERE status='EXECUTING'");
-  for(String user:jdbc.queryForList("SELECT DISTINCT username FROM account_lifecycle_tasks WHERE status IN ('UNKNOWN','SYNC_PENDING')",String.class))access.lifecycle(user,"SYNC_PENDING",true);
+  // Uncertain credential operations remain fail-closed, including legacy crashes before invalidation.
+  // Grant/revoke recovery must never invalidate authentication just because worker restarted.
+  for(Map<String,Object> task:jdbc.queryForList("SELECT DISTINCT username,operation FROM account_lifecycle_tasks WHERE status IN ('UNKNOWN','SYNC_PENDING')"))
+   access.lifecycle(String.valueOf(task.get("username")),"SYNC_PENDING",AccountChangeImpact.of(String.valueOf(task.get("operation"))).credentials);
  }
  public synchronized Map<String,Object> execute(String actor,String database,String sql)throws Exception{
   if(!"root".equals(actor))throw new SecurityException("当前自动账号管理仅开放给已接入的 Doris root，其他账号不代为执行。");
@@ -50,7 +53,7 @@ public class AccountLifecycleService {
   jdbc.update("INSERT INTO account_lifecycle_tasks VALUES(?,?,?,?,?,?, 'EXECUTING','正在执行数据库账号操作',?,?)",
     task,actor,cmd.username,cmd.operation,sourceId,cmd.password==null?null:secrets.encrypt(cmd.password),now,now);
   boolean previouslyActive=access.lifecycleActive(cmd.username);
-  access.lifecycle(cmd.username,"SYNC_PENDING",true);
+  access.beginLifecycle(cmd.username,cmd.operation);
   try(Connection c=DriverManager.getConnection(AccountAccessService.url(source,"information_schema"),actor,store.connectionPassword(sourceId));Statement s=c.createStatement()){
    s.setQueryTimeout(15);
    // Actual database authorization is mandatory; no pooled control/metadata identity.
@@ -69,6 +72,7 @@ public class AccountLifecycleService {
   Map<String,Object> result=task(task);
   if(!"SUCCEEDED".equals(result.get("status")))throw new IllegalStateException("Doris 操作已成功，网关同步待处理；不要重复执行 SQL。任务 "+task+"："+result.get("message"));
   if(!"DROP".equals(cmd.operation))result.put("epoch",access.lifecycleEpoch(cmd.username));
+  result.put("permissionEpoch",access.permissionEpoch(cmd.username));
   return result;
  }
  private List<Map<String,Object>> matching(String user){List<Map<String,Object>> result=new ArrayList<>();for(Map<String,Object> s:store.connections())if(user.equals(s.get("username")))result.add(s);return result;}

@@ -15,6 +15,8 @@ public class AccountAccessStore {
     @PostConstruct
     public void initialize() {
         jdbc.execute("CREATE TABLE IF NOT EXISTS account_lifecycle_states(username VARCHAR(128) PRIMARY KEY,status VARCHAR(32),epoch BIGINT NOT NULL DEFAULT 0)");
+        // Keep epoch as the credential epoch for wire compatibility with existing Proxy builds.
+        jdbc.execute("ALTER TABLE account_lifecycle_states ADD COLUMN IF NOT EXISTS permission_epoch BIGINT NOT NULL DEFAULT 0");
         jdbc.execute("CREATE TABLE IF NOT EXISTS account_database_bindings (connection_id BIGINT NOT NULL, logical_name VARCHAR(255) NOT NULL, status VARCHAR(32) NOT NULL, updated_at VARCHAR(64) NOT NULL, PRIMARY KEY(connection_id,logical_name))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS account_privilege_snapshots (connection_id BIGINT PRIMARY KEY, matched_identity VARCHAR(255), grants_json CLOB, status VARCHAR(32) NOT NULL, message CLOB, updated_at VARCHAR(64) NOT NULL)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS account_privilege_scopes (id BIGINT AUTO_INCREMENT PRIMARY KEY, connection_id BIGINT NOT NULL, catalog_name VARCHAR(255), database_name VARCHAR(255), table_name VARCHAR(255), privilege_name VARCHAR(64), grant_source VARCHAR(64))");
@@ -35,8 +37,18 @@ public class AccountAccessStore {
     }
     public void lifecycle(String user,String status,boolean increment) {
         if(jdbc.queryForObject("SELECT COUNT(*) FROM account_lifecycle_states WHERE username=?",Integer.class,user)==0)
-            jdbc.update("INSERT INTO account_lifecycle_states VALUES(?,?,?)",user,status,increment?1:0);
+            jdbc.update("INSERT INTO account_lifecycle_states(username,status,epoch) VALUES(?,?,?)",user,status,increment?1:0);
         else jdbc.update("UPDATE account_lifecycle_states SET status=?,epoch=epoch+? WHERE username=?",status,increment?1:0,user);
+    }
+    @org.springframework.transaction.annotation.Transactional
+    public void beginLifecycle(String user,String operation) {
+        AccountChangeImpact impact=AccountChangeImpact.of(operation);
+        lifecycle(user,"SYNC_PENDING",impact.credentials);
+        if(impact.permissions)jdbc.update("UPDATE account_lifecycle_states SET permission_epoch=permission_epoch+1 WHERE username=?",user);
+    }
+    public long permissionEpoch(String user) {
+        List<Long> rows=jdbc.queryForList("SELECT permission_epoch FROM account_lifecycle_states WHERE username=?",Long.class,user);
+        return rows.isEmpty()?0:rows.get(0);
     }
     public long lifecycleEpoch(String user) {
         List<Map<String,Object>> rows=jdbc.queryForList("SELECT * FROM account_lifecycle_states WHERE username=?",user);

@@ -49,6 +49,11 @@ public class PublishedPolicyStore {
         jdbc.update("UPDATE policy_publications SET status=? WHERE version_id=?",status,version);
         jdbc.update("UPDATE publish_versions SET status=?,message=? WHERE id=?",status,message,version);
     }
+    @Transactional public void activateRename(long version,String status,String executionId) {
+        activate(version,status);
+        if(jdbc.update("UPDATE managed_sql_executions SET rename_policy_version=? WHERE execution_id=? AND rename_registry_applied=TRUE AND success_received=TRUE AND status='SYNCING'",version,executionId)!=1)
+            throw new IllegalStateException("改名任务状态已变化，禁止激活策略。");
+    }
     public Map<String,Object> before(long version) {
         List<String> rows=jdbc.queryForList("SELECT before_json FROM policy_publications WHERE version_id=? AND status IN ('PUBLISHED','ROLLED_BACK')",String.class,version);
         if(rows.isEmpty()||rows.get(0)==null) throw new IllegalArgumentException("该版本没有可验证的前一策略快照，不能回滚；请重新确认并发布策略。");

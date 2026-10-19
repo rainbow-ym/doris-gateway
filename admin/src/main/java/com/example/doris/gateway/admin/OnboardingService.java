@@ -12,12 +12,13 @@ public class OnboardingService {
     private final DistSqlService proxy;
     private final GatewayAccounts accounts;
     private final AccountAccessStore access;
+    private final ObjectIdentityService identities;
     @org.springframework.beans.factory.annotation.Value("${GATEWAY_MULTI_USER_ENABLED:false}")
     private boolean multiUserEnabled;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final Map<String,String> inFlight=new ConcurrentHashMap<>();
-    public OnboardingService(AdminStore store,DorisMetadataService metadata,DistSqlService proxy,GatewayAccounts accounts,AccountAccessStore access) {
-        this.store=store;this.metadata=metadata;this.proxy=proxy;this.accounts=accounts;this.access=access;
+    public OnboardingService(AdminStore store,DorisMetadataService metadata,DistSqlService proxy,GatewayAccounts accounts,AccountAccessStore access,ObjectIdentityService identities) {
+        this.store=store;this.metadata=metadata;this.proxy=proxy;this.accounts=accounts;this.access=access;this.identities=identities;
     }
     @PreDestroy public void stop() { worker.shutdownNow(); }
 
@@ -83,6 +84,8 @@ public class OnboardingService {
             proxy.controlSql(database,(exists?"ALTER":"REGISTER")+" STORAGE UNIT "+definition);
             stage="扫描字段与加载表";progress(id,stage);
             List<String> tables=metadata.tables(connectionId,database);
+            // Re-onboarding is not an implicit authorization to replace an established identity baseline.
+            for(String table:tables) identities.require(connectionId,database,table);
             for(String table:tables) {
                 store.discoverManagedObject(connectionId,database,table,"TABLE");
                 metadata.scanTable(connectionId,database,table);

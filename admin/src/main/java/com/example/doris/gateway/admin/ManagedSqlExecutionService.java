@@ -43,17 +43,19 @@ public final class ManagedSqlExecutionService {
     private final SqlLineageAnalyzer lineage;
     private final DorisMetadataService metadata;
     private final DistSqlService distSql;
+    private final ObjectIdentityService identities;
     private final byte[] expectedToken;
     @org.springframework.beans.factory.annotation.Autowired
     private AccountAccessService accountAccess;
 
     public ManagedSqlExecutionService(final AdminStore store, final SqlLineageAnalyzer lineage,
                                       final DorisMetadataService metadata, final DistSqlService distSql,
-                                      @Value("${gateway-admin.lineage-token}") final String token) {
+                                      @Value("${gateway-admin.lineage-token}") final String token, final ObjectIdentityService identities) {
         this.store = store;
         this.lineage = lineage;
         this.metadata = metadata;
         this.distSql = distSql;
+        this.identities = identities;
         expectedToken = token == null ? new byte[0] : token.getBytes(StandardCharsets.UTF_8);
     }
 
@@ -86,31 +88,9 @@ public final class ManagedSqlExecutionService {
             String target = analysis == null ? "" : analysis.target.table;
             String renameTarget = analysis == null || analysis.renameTarget == null ? "" : analysis.renameTarget.table;
 
-            if (isCreate(type)) {
-                Map<String, Object> existing = store.managedObject(connectionId, physicalDatabase, target);
-                if (!existing.isEmpty() && "ACTIVE".equalsIgnoreCase(stringValue(existing, "status"))) {
-                    store.saveManagedExecution(executionId, connectionId, storageUnit, logicalDatabase, physicalDatabase,
-                            "NOOP", target, "", sql, "PREPARED");
-                    return response(executionId, "NOOP");
-                }
-                store.upsertManagedObject(connectionId, physicalDatabase, target, objectType(type), "PREPARED", executionId, "DDL accepted and awaiting Doris execution.");
-            } else if ("ALTER".equals(type) || "DROP".equals(type)) {
-                store.setObjectStatus(connectionId, physicalDatabase, target, "SYNCING", executionId, "DDL is executing.");
-            } else if ("RENAME".equals(type)) {
-                Map<String, Object> renameObject = store.managedObject(connectionId, physicalDatabase, renameTarget);
-                if (!renameObject.isEmpty() && !"DROPPED".equals(stringValue(renameObject, "status")) && !"FAILED".equals(stringValue(renameObject, "status"))) {
-                    throw notFound(physicalDatabase, renameTarget, "rename target is already registered");
-                }
-                store.setObjectStatus(connectionId, physicalDatabase, target, "SYNCING", executionId, "Rename is executing.");
-                store.upsertManagedObject(connectionId, physicalDatabase, renameTarget, "TABLE", "PREPARED", executionId, "Reserved rename target.");
-            } else if ("INSERT_SELECT".equals(type) || "UPDATE".equals(type)) {
-                // Keep new readers out until Doris succeeds and inherited protection is published.
-                // A rejected write must not change the shared protection policy.
-                store.setObjectStatus(connectionId, physicalDatabase, target, "SYNCING", executionId, "正在写入并同步敏感标签，请稍后查询。");
-            }
-            store.saveManagedExecution(executionId, connectionId, storageUnit, logicalDatabase, physicalDatabase,
-                    type, target, renameTarget, sql, "PREPARED");
-            return response(executionId, type);
+            store.reserveManagedExecution(executionId,connectionId,storageUnit,logicalDatabase,physicalDatabase,
+                    type,target,renameTarget,sql,objectType(type));
+            return response(executionId,stringValue(store.managedExecution(executionId),"statement_type"));
         } catch (final ManagedObjectAccessException ex) {
             throw ex;
         } catch (final RuntimeException ex) {
@@ -128,7 +108,7 @@ public final class ManagedSqlExecutionService {
         if (!"PREPARED".equals(status) && !"SYNCING".equals(status) && !"FAILED".equals(status)) {
             throw new IllegalStateException("Execution cannot be committed from state " + status + '.');
         }
-        store.updateManagedExecution(executionId, "SYNCING", "Doris execution succeeded; synchronizing registry and policies.");
+        store.acknowledgeExecution(executionId);
         long connectionId = longValue(execution, "connection_id");
         String logicalDatabase = stringValue(execution, "logical_database");
         String physicalDatabase = stringValue(execution, "physical_database");
@@ -137,6 +117,7 @@ public final class ManagedSqlExecutionService {
         String renameTarget = stringValue(execution, "rename_target_table");
         String sql = stringValue(execution, "raw_sql");
         try {
+            identities.verifyExecution(store.managedExecution(executionId));
             List<Map<String, Object>> edges = new ArrayList<>();
             if ("NOOP".equals(type)) {
                 // No physical or registry change.
@@ -144,9 +125,8 @@ public final class ManagedSqlExecutionService {
                 if (!metadata.tableExists(connectionId, physicalDatabase, renameTarget)) {
                     throw new IllegalStateException("Renamed object is not visible in Doris metadata: " + renameTarget);
                 }
-                store.renameTable(connectionId, physicalDatabase, target, renameTarget);
-                store.renameManagedObject(connectionId, physicalDatabase, target, renameTarget, executionId);
-                distSql.publishManaged(logicalDatabase,type,target,renameTarget,edges);
+                store.applyRenameRegistry(executionId);
+                distSql.publishRename(logicalDatabase,executionId,target,renameTarget);
             } else if ("DROP".equals(type)) {
                 if (metadata.tableExists(connectionId, physicalDatabase, target)) {
                     throw new IllegalStateException("Dropped object is still visible in Doris metadata: " + target);
@@ -159,7 +139,6 @@ public final class ManagedSqlExecutionService {
                 if (columns == 0) throw new IllegalStateException("Altered object is not visible in Doris metadata: " + target);
                 store.confirmRecommendationsForTable(connectionId, physicalDatabase, target);
                 distSql.publishManaged(logicalDatabase,type,target,renameTarget,edges);
-                store.setObjectStatus(connectionId, physicalDatabase, target, "ACTIVE", null, null);
                 store.bumpPolicyVersion(connectionId, physicalDatabase, target);
             } else {
                 SqlLineageAnalyzer.Analysis analysis = lineageAnalysis(type, sql, connectionId, physicalDatabase);
@@ -170,12 +149,10 @@ public final class ManagedSqlExecutionService {
                     store.confirmRecommendationsForTable(connectionId, physicalDatabase, target);
                     edges = inheritPolicies(connectionId, physicalDatabase, analysis);
                     distSql.publishManaged(logicalDatabase,type,target,renameTarget,edges);
-                    store.setObjectStatus(connectionId, physicalDatabase, target, "ACTIVE", null, null);
                     store.bumpPolicyVersion(connectionId, physicalDatabase, target);
                 } else if ("INSERT_SELECT".equals(type) || "UPDATE".equals(type)) {
                     edges = inheritPolicies(connectionId, physicalDatabase, analysis);
                     distSql.publishManaged(logicalDatabase,type,target,renameTarget,edges);
-                    store.setObjectStatus(connectionId, physicalDatabase, target, "ACTIVE", null, null);
                     store.bumpPolicyVersion(connectionId, physicalDatabase, target);
                 }
             }
@@ -187,15 +164,11 @@ public final class ManagedSqlExecutionService {
             event.put("edges", edges);
             event.put("eventTime", text(incoming, "eventTime", Instant.now().toString()));
             boolean created = store.saveLineageEvent(event);
-            if (accountAccess != null) accountAccess.objectChanged(logicalDatabase,type,target,renameTarget);
-            store.updateManagedExecution(executionId, "COMMITTED", "全局对象、血缘、保护策略及用户权限映射已同步。");
+            store.completeOwnedExecution(executionId,"全局对象、血缘、保护策略及用户权限映射已同步。",
+                    () -> {if(accountAccess!=null)accountAccess.objectChanged(logicalDatabase,type,target,renameTarget);});
             return created;
         } catch (final Exception ex) {
-            if (isCreate(type)) store.setObjectStatus(connectionId, physicalDatabase, target, "FAILED", executionId, safeMessage(ex));
-            else if ("ALTER".equals(type) || "DROP".equals(type) || "RENAME".equals(type) || "INSERT_SELECT".equals(type) || "UPDATE".equals(type)) {
-                store.setObjectStatus(connectionId, physicalDatabase, target, "FAILED", executionId, safeMessage(ex));
-            }
-            store.updateManagedExecution(executionId, "FAILED", safeMessage(ex));
+            store.finishOwnedExecution(executionId,"FAILED",safeMessage(ex));
             throw new IllegalStateException("Post-execution synchronization failed; object remains inaccessible: " + safeMessage(ex), ex);
         }
     }
@@ -209,38 +182,41 @@ public final class ManagedSqlExecutionService {
         Map<String, Object> execution = store.managedExecution(executionId);
         String status = stringValue(execution, "status");
         if (!"PREPARED".equals(status) && !"SYNCING".equals(status)) return;
+        store.requireExecutionOwner(executionId);
         long connectionId = longValue(execution, "connection_id");
         String database = stringValue(execution, "physical_database");
         String type = stringValue(execution, "statement_type");
         String target = stringValue(execution, "target_table");
         String renameTarget = stringValue(execution, "rename_target_table");
         if (uncertain) {
-            if (!target.isEmpty()) store.setObjectStatus(connectionId,database,target,"FAILED",executionId,"数据库执行结果不确定，等待元数据核查；不会自动重放写入语句。");
-            store.updateManagedExecution(executionId,"UNKNOWN","执行结果不确定："+message+"；不会自动推定成功或重放业务 SQL。");
+            store.finishOwnedExecution(executionId,"UNKNOWN","执行结果不确定："+message+"；不会自动推定成功或重放业务 SQL。");
             return;
         }
-        if (isCreate(type)) store.setObjectStatus(connectionId, database, target, "FAILED", executionId, message);
-        if ("ALTER".equals(type) || "DROP".equals(type) || "RENAME".equals(type) || "INSERT_SELECT".equals(type) || "UPDATE".equals(type)) store.setObjectStatus(connectionId, database, target, "ACTIVE", null, "数据库明确拒绝执行，已恢复原对象状态。");
-        if ("RENAME".equals(type) && !renameTarget.isEmpty()) store.setObjectStatus(connectionId, database, renameTarget, "FAILED", executionId, "Rename failed.");
-        store.updateManagedExecution(executionId, "ABORTED", message);
+        if(Boolean.TRUE.equals(execution.get("success_received"))) {
+            store.finishOwnedExecution(executionId,"FAILED","已收到成功确认，忽略迟到失败回调并保留同步任务。");return;
+        }
+        store.finishOwnedExecution(executionId,"ABORTED",message);
     }
 
     public synchronized Map<String, Object> reconcile(final String executionId) {
         Map<String, Object> execution = store.managedExecution(executionId);
         String status = stringValue(execution, "status");
-        if ("PREPARED".equals(status)) {
+        if("COMMITTED".equals(status))return Collections.<String,Object>singletonMap("created",false);
+        if(!"PREPARED".equals(status)&&!"SYNCING".equals(status)&&!"FAILED".equals(status))
+            throw new IllegalStateException("当前任务状态不允许自动恢复："+status);
+        store.requireExecutionOwner(executionId);
+        if (!Boolean.TRUE.equals(execution.get("success_received"))) {
             // No success callback was durably received. Table existence is not proof
             // that this execution succeeded (another session may create the same name).
-            String target = stringValue(execution, "target_table");
-            if (!target.isEmpty() && !"NOOP".equals(stringValue(execution, "statement_type"))) {
-                store.setObjectStatus(longValue(execution, "connection_id"), stringValue(execution, "physical_database"),
-                        target, "FAILED", executionId, "未收到数据库成功确认，执行结果待核实。");
-            }
-            store.updateManagedExecution(executionId, "UNKNOWN", "未收到数据库成功确认；禁止根据同名对象存在推定成功，需核实执行结果。");
+            store.finishOwnedExecution(executionId, "UNKNOWN", "未收到数据库成功确认；禁止根据同名对象存在推定成功，需核实执行结果。");
             throw new IllegalStateException("数据库执行结果未知，已保持阻断；不能自动恢复为成功或重放 SQL。");
         }
         if ("UNKNOWN".equals(status)) {
             throw new IllegalStateException("数据库执行结果未知，请先核实真实执行结果；当前入口不会自动推定成功。");
+        }
+        if(((Number)execution.get("recovery_attempts")).intValue()>=10) {
+            store.finishOwnedExecution(executionId,"MANUAL_REQUIRED","同步重试已达上限，保持阻断，需人工核实。");
+            throw new IllegalStateException("同步重试已达上限，需人工核实。");
         }
         Map<String, Object> event = new LinkedHashMap<>();
         event.put("eventId", executionId);
@@ -259,6 +235,12 @@ public final class ManagedSqlExecutionService {
         if (!"UNMANAGED".equals(status) && !"DRIFTED".equals(status)) {
             throw new IllegalStateException("Only UNMANAGED or DRIFTED objects can be approved; current state is " + status + '.');
         }
+        // Approval can refresh schema, but must never silently adopt a replacement's old lineage.
+        try {
+            identities.require(connectionId, database, table);
+        } catch (final Exception ex) {
+            throw new IllegalStateException("物理身份未通过校验，不能通过普通审批覆盖旧血缘：" + safeMessage(ex), ex);
+        }
         try {
             Map<String, Object> mapping = store.logicalDatabaseFor(connectionId, database);
             String logicalDatabase = stringValue(mapping, "logical_name");
@@ -270,13 +252,16 @@ public final class ManagedSqlExecutionService {
             distSql.synchronizeSingleTable(logicalDatabase, storageUnit, table);
             store.confirmRecommendationsForTable(connectionId, database, table);
             distSql.publishManaged(logicalDatabase,"APPROVE",table,"",Collections.emptyList());
+            identities.require(connectionId, database, table);
             store.setObjectStatus(connectionId, database, table, "ACTIVE", null, null);
             store.bumpPolicyVersion(connectionId, database, table);
             if (accountAccess != null) accountAccess.project(logicalDatabase);
             store.audit("MANAGED_OBJECT_APPROVED", "objectId=" + objectId + ",database=" + database + ",table=" + table);
             return response(String.valueOf(objectId), "ACTIVE");
         } catch (final Exception ex) {
-            store.setObjectStatus(connectionId, database, table, "FAILED", null, safeMessage(ex));
+            // New-source approval only synchronizes metadata/policies, never replays business SQL.
+            // Keep a failed first admission unreadable but eligible for an explicit approval retry.
+            store.setObjectStatus(connectionId, database, table, "UNMANAGED".equals(status) ? "UNMANAGED" : "FAILED", null, safeMessage(ex));
             throw new IllegalStateException("Managed object approval failed; object remains inaccessible: " + safeMessage(ex), ex);
         }
     }
@@ -316,6 +301,7 @@ public final class ManagedSqlExecutionService {
             if (isSystemDatabase(reference.database)) continue;
             if (!physicalDatabase.equalsIgnoreCase(reference.database)) throw notFound(reference.database, reference.table, "cross-database access is not registered in this logical database");
             if (!store.isActiveManagedObject(connectionId, physicalDatabase, reference.table)) throw notFound(physicalDatabase, reference.table, "object is absent or not ACTIVE");
+            identities.require(connectionId,physicalDatabase,reference.table);
         }
     }
 

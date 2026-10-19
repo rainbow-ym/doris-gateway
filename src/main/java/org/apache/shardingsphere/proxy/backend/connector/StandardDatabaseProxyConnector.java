@@ -123,6 +123,7 @@ public final class StandardDatabaseProxyConnector implements DatabaseProxyConnec
     private List<QueryHeader> queryHeaders;
 
     private MergedResult mergedResult;
+    private com.example.doris.gateway.security.Sm4ExportRows sm4ExportRows;
 
     public StandardDatabaseProxyConnector(final JDBCDriverType driverType, final QueryContext queryContext, final ProxyDatabaseConnectionManager databaseConnectionManager) {
         this.driverType = driverType;
@@ -305,6 +306,11 @@ public final class StandardDatabaseProxyConnector implements DatabaseProxyConnec
     private QueryResponseHeader processExecuteQuery(final SQLStatementContext sqlStatementContext, final List<QueryResult> queryResults, final QueryResult queryResultSample) throws SQLException {
         queryHeaders = createQueryHeaders(sqlStatementContext, queryResultSample);
         mergedResult = mergeQuery(queryResults);
+        if(mergedResult instanceof org.apache.shardingsphere.mask.merge.dql.MaskMergedResult) {
+            sm4ExportRows=com.example.doris.gateway.security.Sm4ExportRows.prepare(
+                    (org.apache.shardingsphere.mask.merge.dql.MaskMergedResult)mergedResult,queryHeaders,
+                    databaseConnectionManager.getConnectionSession().getConnectionContext().getGrantee().getUsername(),database.getName());
+        }
         return new QueryResponseHeader(queryHeaders);
     }
 
@@ -374,6 +380,7 @@ public final class StandardDatabaseProxyConnector implements DatabaseProxyConnec
 
     @Override
     public boolean next() throws SQLException {
+        if(sm4ExportRows!=null)return sm4ExportRows.next();
         return null != mergedResult && mergedResult.next();
     }
 
@@ -381,7 +388,7 @@ public final class StandardDatabaseProxyConnector implements DatabaseProxyConnec
     public QueryResponseRow getRowData() throws SQLException {
         List<QueryResponseCell> cells = new ArrayList<>(queryHeaders.size());
         for (int columnIndex = 1; columnIndex <= queryHeaders.size(); columnIndex++) {
-            Object data = mergedResult.getValue(columnIndex, Object.class);
+            Object data = sm4ExportRows==null?mergedResult.getValue(columnIndex, Object.class):sm4ExportRows.value(columnIndex-1);
             cells.add(new QueryResponseCell(queryHeaders.get(columnIndex - 1).getColumnType(), data, queryHeaders.get(columnIndex - 1).getColumnTypeName()));
         }
         return new QueryResponseRow(cells);
@@ -389,6 +396,7 @@ public final class StandardDatabaseProxyConnector implements DatabaseProxyConnec
 
     @Override
     public void close() throws SQLException {
+        if(sm4ExportRows!=null){sm4ExportRows.clear();sm4ExportRows=null;}
         Collection<SQLException> result = new LinkedList<>();
         result.addAll(closeResultSets());
         result.addAll(closeStatements());

@@ -1,0 +1,3 @@
+FROM doris-security-gateway:confirmation-test-20261017
+COPY doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar /opt/shardingsphere-proxy/hardening-lib/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint

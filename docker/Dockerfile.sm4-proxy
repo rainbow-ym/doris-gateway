@@ -1,0 +1,2 @@
+FROM doris-security-gateway:release-20261018
+COPY doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar /opt/shardingsphere-proxy/hardening-lib/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar

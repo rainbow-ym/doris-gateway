@@ -1,0 +1,18 @@
+/* Optional compatibility experiment; all control/decrypt operations require administrator login. */
+addPage('sm4Export','SM4 加密导出','<div class="card"><h3>末行密文配置（默认关闭）</h3><p class="notice">开启后，该账号在指定库的所有受保护查询都会追加一行密文，不仅是点击导出时。业务系统必须完整保留末行。当前只支持文本、整数、定点数；超限则整个查询失败，不返回半份文件。</p><form id="sm4ProfileForm"><div class="grid"><label>数据库用户名<input name="username" required autocomplete="off"></label><label>逻辑数据库<input name="databaseName" required autocomplete="off"></label><label>最大结果行数（1—1000）<input name="maxRows" type="number" min="1" max="1000" value="200" required></label><label>文件有效期（分钟，1—1440）<input name="ttlMinutes" type="number" min="1" max="1440" value="60" required></label></div><label><input name="enabled" type="checkbox">启用末行 SM4 加密</label><label><input name="allowDecrypt" type="checkbox">允许管理员解密该账号的文件</label><p>密文单元格最多 30000 字符。密钥保存在 worker 数据目录，不在网页显示。先用测试账号和小结果验证兼容性。</p><button type="submit" class="primary">保存配置</button></form><div id="sm4Profiles"></div></div><div class="card"><h3>授权解密 CSV</h3><p>上传带表头的 UTF-8 CSV（逗号分隔、双引号转义、NULL 导出为空），保留原行列顺序和最后密文行。暂不接收 XLSX、XLS、制表符文件；排序、改值或截断会被拒绝。解密下载中以 =、+、-、@、制表符或回车开头的值会加单引号，防止表格公式执行。</p><input id="sm4CsvFile" type="file" accept=".csv,text/csv"><button onclick="decryptSm4File(this)" class="primary">校验并下载明文</button><p id="sm4DownloadStatus" aria-live="polite"></p></div><div class="card"><div class="toolbar"><h3>最近 100 个加密文件</h3><button onclick="run(this,loadSm4Export)">刷新</button></div><p>原始数据不保存到系统库。撤销文件或关闭解密授权后，旧文件无法继续解密。密钥轮换需保留旧密钥至全部旧文件失效。</p><div id="sm4Receipts"></div></div>',loadSm4Export);
+async function loadSm4Export(){
+ const [profiles,receipts]=await Promise.all([api('/api/sm4-export/profiles'),api('/api/sm4-export/receipts')]);
+ $('sm4Profiles').innerHTML=table(profiles,[['username','账号'],['databaseName','库'],['enabled','末行加密'],['allowDecrypt','允许管理员解密'],['maxRows','行数上限'],['ttlMinutes','有效分钟']]);
+ $('sm4Receipts').innerHTML=table(receipts.map(r=>({...r,expiresAt:new Date(r.expiresAt).toLocaleString()})),[['id','文件编号'],['username','原账号'],['databaseName','库'],['rowCount','行数'],['expiresAt','有效截止'],['revoked','已撤销']],r=>r.revoked?'':'<button onclick="revokeSm4File(this,'+arg(r.id)+')">撤销解密</button>');
+}
+$('sm4ProfileForm').onsubmit=async e=>{e.preventDefault();const f=e.target,r=Object.fromEntries(new FormData(f));r.enabled=f.elements.enabled.checked;r.allowDecrypt=f.elements.allowDecrypt.checked;r.maxRows=+r.maxRows;r.ttlMinutes=+r.ttlMinutes;
+ if(!await confirmAction('更新末行加密设置','开启会改变查询行数，可能影响现有页面和导出；关闭解密授权会立即阻止旧文件解密。确认保存？'))return;
+ await run(e.submitter,async()=>{const result=await api('/api/sm4-export/profiles',{method:'POST',body:JSON.stringify(r)});notify(result.message);await loadSm4Export();});};
+async function decryptSm4File(b){await run(b,async()=>{
+ const f=$('sm4CsvFile').files[0];if(!f)throw Error('请选择 CSV 文件');if(f.size>1024*1024)throw Error('文件超过 1 MiB，请缩小原查询范围');
+ const csv=new TextDecoder('utf-8',{fatal:true}).decode(await f.arrayBuffer());
+ const result=await api('/api/sm4-export/decrypt',{method:'POST',body:JSON.stringify({csv})});
+ const url=URL.createObjectURL(new Blob([result.csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=result.filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);
+ $('sm4CsvFile').value='';$('sm4DownloadStatus').textContent='校验通过，已生成明文下载。请按敏感数据要求保管文件。';
+})}
+async function revokeSm4File(b,id){if(!await confirmAction('撤销文件解密','撤销后不能再次通过平台解密该文件，是否继续？'))return;await run(b,async()=>{await api('/api/sm4-export/receipts/'+encodeURIComponent(id)+'/revoke',{method:'POST'});await loadSm4Export();});}

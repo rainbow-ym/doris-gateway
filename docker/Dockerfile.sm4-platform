@@ -1,0 +1,2 @@
+FROM doris-security-gateway-platform:release-20261019
+COPY gateway-platform-0.1.0.jar /opt/gateway-platform/app.jar

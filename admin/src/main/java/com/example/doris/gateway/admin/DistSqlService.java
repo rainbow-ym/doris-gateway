@@ -223,7 +223,25 @@ public class DistSqlService {
         throw new IllegalArgumentException("逻辑库尚未登记，不能发布策略："+requested);
     }
 
+    public void publishRename(String database,String executionId,String from,String to) throws Exception {
+        database=canonicalDatabase(database);
+        synchronized(publicationLocks.computeIfAbsent(database.toLowerCase(java.util.Locale.ROOT),ignored->new Object())) {
+            published.requireNoPending(database);
+            long completed=((Number)store.managedExecution(executionId).get("rename_policy_version")).longValue();
+            if(completed!=0) {
+                if(((Number)published.active(database).get("version")).longValue()!=completed)
+                    throw new IllegalStateException("改名后生效版本已变化，请人工核实，不覆盖后续策略。");
+                bootstrapPolicies(database,false);return;
+            }
+            Map<String,Object> snapshot=AutomaticPolicyDelta.apply(published.active(database),"RENAME",from,to,Collections.emptyList(),Collections.emptyList(),catalog,database);
+            applySnapshot(database,snapshot,"PUBLISHED",executionId);
+        }
+    }
+
     private Map<String,Object> applySnapshot(String database,Map<String,Object> snapshot,String successStatus) throws Exception {
+        return applySnapshot(database,snapshot,successStatus,null);
+    }
+    private Map<String,Object> applySnapshot(String database,Map<String,Object> snapshot,String successStatus,String renameExecution) throws Exception {
         List<RuleRow> current = readRules(database);
         List<RuleRow> desired = mapper.convertValue(snapshot.get("globalRules"), new TypeReference<List<RuleRow>>() { });
         List<String> sql = statements(current, desired);
@@ -235,7 +253,8 @@ public class DistSqlService {
             if (!normalize(actual).equals(normalize(desired))) {
                 throw new IllegalStateException("Published MASK rules do not match desired state.");
             }
-            published.activate(version,successStatus);
+            if(renameExecution==null)published.activate(version,successStatus);
+            else published.activateRename(version,successStatus,renameExecution);
         } catch (final Exception ex) {
             String recovery = recover(database, current);
             boolean recovered = false;

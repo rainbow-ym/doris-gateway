@@ -1,0 +1,2 @@
+FROM doris-security-gateway-admin:release-20261019
+COPY doris-security-gateway-admin-0.1.0.jar /opt/gateway-admin/app.jar

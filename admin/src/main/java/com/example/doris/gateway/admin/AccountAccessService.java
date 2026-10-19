@@ -49,6 +49,7 @@ public class AccountAccessService {
         Map<String,Object> result=new LinkedHashMap<>();
         result.put("mode","USER");result.put("connectionId",id);result.put("username",first.get("username"));
         result.put("epoch",epoch);
+        result.put("permissionEpoch",access.permissionEpoch(username));
         result.put("password",store.connectionPassword(id));
         result.put("url",url(first,String.valueOf(mapping.get("physical_database"))));
         return result;

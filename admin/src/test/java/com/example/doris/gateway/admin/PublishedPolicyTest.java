@@ -19,7 +19,7 @@ class PublishedPolicyTest {
     private FakeProxy proxy;
     private final ObjectMapper mapper=new ObjectMapper();
     @BeforeEach void setup() {
-        DriverManagerDataSource ds=new DriverManagerDataSource("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1","sa","");
+        DriverManagerDataSource ds=new DriverManagerDataSource(SystemDataSourceConfig.safeUrl("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1"),"sa","");
         jdbc=new JdbcTemplate(ds);
         store=new AdminStore(jdbc,mapper,null);store.initialize();
         ProxyFactory factory=new ProxyFactory(new PublishedPolicyStore(jdbc,mapper));
@@ -198,6 +198,30 @@ class PublishedPolicyTest {
         assertThrows(RuntimeException.class,()->published.activate(next,"ROLLED_BACK"));
         assertEquals(first,((Number)published.active("db").get("version")).longValue());
     }
+    @Test void renameActivationMustNotMovePointerWithoutExecutionMarker() throws Exception {
+        long first=publish("ID_CARD");long next=pending();
+        assertThrows(IllegalStateException.class,()->published.activateRename(next,"PUBLISHED","missing-task"));
+        assertEquals(first,((Number)published.active("db").get("version")).longValue());
+        assertEquals("APPLYING",published.publication(next).get("status"));
+    }
+
+    @Test void renameRetryUsesRecordedSnapshotAndRejectsLaterPolicyVersion() throws Exception {
+        publish("ID_CARD");
+        store.upsertManagedObject(1,"physical","people","TABLE","ACTIVE",null,"");
+        store.reserveManagedExecution("rename-test",1,"unit","db","physical","RENAME","people","renamed","ALTER TABLE people RENAME renamed","TABLE");
+        store.acknowledgeExecution("rename-test");store.applyRenameRegistry("rename-test");
+        PolicyCatalog.Policy p=new PolicyCatalog().get("ID_CARD");
+        List<DistSqlService.RuleRow> renamed=Collections.singletonList(new DistSqlService.RuleRow("renamed","secret",p.algorithmType,p.props));
+        proxy.next.add(renamed);proxy.publishRename("db","rename-test","people","renamed");
+        long recorded=((Number)store.managedExecution("rename-test").get("rename_policy_version")).longValue();
+        assertEquals(recorded,((Number)published.active("db").get("version")).longValue());
+        int versions=store.versions().size();
+        proxy.publishRename("db","rename-test","people","renamed");
+        assertEquals(versions,store.versions().size());
+        proxy.next.add(renamed);proxy.publishManaged("db","ALTER","renamed","",Collections.emptyList());
+        assertThrows(IllegalStateException.class,()->proxy.publishRename("db","rename-test","people","renamed"));
+    }
+
     private class FakeProxy extends DistSqlService {
         List<RuleRow> runtime=new ArrayList<>();Deque<List<RuleRow>> next=new ArrayDeque<>();boolean failNext;
         FakeProxy(){super(store,new PolicyCatalog(),mapper,"unused",1,"control","");}

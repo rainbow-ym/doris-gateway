@@ -33,14 +33,16 @@ public class AccountAccessController {
         service.authenticate(token);return service.policyPlan(r.get("username"),r.get("database"));
     }
     @PostMapping("/internal/sql/check-account") public Object check(@RequestHeader(value="X-Gateway-Lineage-Token",required=false) String token,@RequestBody Map<String,String> r)throws Exception {
-        service.authenticate(token);Map<String,Object> resolved=service.resolve(r.get("username"),r.get("database"));return Collections.singletonMap("epoch",resolved.getOrDefault("epoch",0));
+        service.authenticate(token);Map<String,Object> resolved=service.resolve(r.get("username"),r.get("database"));
+        Map<String,Object> versions=new LinkedHashMap<>();versions.put("epoch",resolved.getOrDefault("epoch",0));
+        versions.put("permissionEpoch",resolved.getOrDefault("permissionEpoch",0));return versions;
     }
     @PostMapping("/internal/sql/audit") public Object audit(@RequestHeader(value="X-Gateway-Lineage-Token",required=false) String token,@RequestBody Map<String,String> r) {
         service.authenticate(token);
         String outcome=r.get("outcome");if(!Arrays.asList("STARTED","EXECUTED","FAILED","UNKNOWN").contains(outcome))throw new IllegalArgumentException("无效审计状态。");
         String requestId=r.getOrDefault("requestId","");
         if(!requestId.isEmpty()&&!requestId.matches("[a-f0-9-]{36}"))throw new IllegalArgumentException("无效请求编号。");
-        store.audit("USER_SQL_"+outcome,"requestId="+requestId+",user="+r.get("username")+",database="+r.get("database")+",sqlDigest="+r.get("sqlDigest"));
+        store.recordExecutionAudit(requestId,outcome,"requestId="+requestId+",user="+r.get("username")+",database="+r.get("database")+",sqlDigest="+r.get("sqlDigest"));
         return Collections.singletonMap("status","RECORDED");
     }
     @ExceptionHandler({IllegalArgumentException.class,IllegalStateException.class})

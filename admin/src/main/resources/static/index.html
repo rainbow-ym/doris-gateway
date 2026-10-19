@@ -81,4 +81,4 @@ async function showAccountAccess(b,id){await run(b,async()=>{$('accountObjectAcc
 async function refreshPermissions(b,id){await run(b,async()=>{await api('/api/connections/'+id+'/refresh-permissions',{method:'POST'});await loadAccountPage()})}
 async function unlinkAccount(b,id,db){if(!await confirmAction('解除账号关联','解除当前账号对 '+db+' 的网关关联；保留 Doris 授权和其他账号关联。'))return;await run(b,async()=>{await api('/api/connections/'+id+'/bindings/'+encodeURIComponent(db),{method:'DELETE'});await loadAccountPage()})}
 (async()=>{try{const h=await api('/api/health');$('version').textContent='版本 '+h.version;policies=await api('/api/policies');$('policySelect').innerHTML='<option value="NONE">不处理</option>'+policies.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');await loadSources()}catch(e){error(e)}})();
-</script><script src="cluster-ui.js"></script></body></html>
+</script><script src="cluster-ui.js"></script><script src="sm4-export-ui.js"></script></body></html>

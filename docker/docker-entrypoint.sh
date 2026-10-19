@@ -48,7 +48,7 @@ start_gateway() {
   echo "Starting Doris security gateway on ${GATEWAY_BIND_ADDRESS:-0.0.0.0}:${GATEWAY_PORT:-3307}"
   exec "${JAVA_HOME}/bin/java" ${GATEWAY_JAVA_OPTS:-${default_java_opts}} \
     -classpath "${class_path}" \
-    org.apache.shardingsphere.proxy.Bootstrap \
+    com.example.doris.gateway.GatewayBootstrap \
     "${GATEWAY_PORT:-3307}" "${conf_dir}" "${GATEWAY_BIND_ADDRESS:-0.0.0.0}"
 }
 

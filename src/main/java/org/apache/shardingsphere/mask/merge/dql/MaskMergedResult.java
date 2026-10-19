@@ -88,6 +88,20 @@ public final class MaskMergedResult extends DecoratorMergedResult {
         Object originalValue = getMergedResult().getValue(columnIndex, Object.class);
         return null == originalValue ? null : maskAlgorithm.get().mask(originalValue);
     }
+    public boolean isExportProtected(int columnIndex){Optional<MaskAlgorithm> algorithm=columnAlgorithms.get(columnIndex);return algorithm!=null&&algorithm.isPresent();}
+    public Object exportOriginalValue(int columnIndex)throws SQLException {
+        if(!isExportProtected(columnIndex))throw new SQLException("禁止提取非保护列的原值。");
+        return getMergedResult().getValue(columnIndex,Object.class);
+    }
+    public List<java.util.Map<String,String>> exportSources(){
+        List<java.util.Map<String,String>> result=new ArrayList<>();
+        for(Integer index:columnAlgorithms.keySet())if(isExportProtected(index)){
+            ColumnSegmentBoundInfo bound=selectStatementContext.findColumnBoundInfo(index).orElseThrow(()->new IllegalStateException("缺少加密导出来源。"));
+            java.util.Map<String,String> source=new java.util.LinkedHashMap<>();
+            source.put("database",bound.getOriginalDatabase().getValue());source.put("table",bound.getOriginalTable().getValue());source.put("column",bound.getOriginalColumn().getValue());result.add(source);
+        }
+        return result;
+    }
 
     private void rejectUnsafeProjection(final int columnIndex) throws SQLException {
         List<Projection> projections = selectStatementContext.getProjectionsContext().getExpandProjections();

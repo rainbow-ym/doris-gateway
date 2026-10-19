@@ -12,9 +12,9 @@ source "$config"
 for ip in "$PLATFORM_BIND_IP" "$GATEWAY_BIND_IP"; do [[ "$ip" =~ ^[0-9a-fA-F:.]+$ ]] || { echo "监听 IP 格式错误：$ip；不能包含协议、空格或主机名。" >&2; exit 2; }; done
 for port in "$PLATFORM_PORT" "$WORKER_PORT" "$GATEWAY_PORT"; do [[ "$port" =~ ^[1-9][0-9]{3,4}$ && "$port" -ge 1024 && "$port" -le 65535 ]] || { echo "端口错误：$port；应为 1024～65535 的整数，不带前导零。" >&2; exit 2; }; done
 [[ "$PLATFORM_PORT" != "$WORKER_PORT" && "$PLATFORM_PORT" != "$GATEWAY_PORT" && "$WORKER_PORT" != "$GATEWAY_PORT" ]] || { echo '三个端口不能相同。' >&2; exit 2; }
-proxy_image=doris-security-gateway:accounts-20261015
-worker_image=doris-security-gateway-admin:accounts-20261015-h2fix1
-platform_image=doris-security-gateway-platform:accounts-20261015
+proxy_image=doris-security-gateway:sm4-export-20261019
+worker_image=doris-security-gateway-admin:sm4-export-20261019
+platform_image=doris-security-gateway-platform:sm4-export-20261019
 for cmd in docker openssl ss hostname; do command -v "$cmd" >/dev/null || { echo "缺少命令：$cmd" >&2; exit 2; }; done
 gateway_host_name="$(hostname)"
 [[ "$gateway_host_name" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ && ${#gateway_host_name} -le 253 ]] || { echo '本机 hostname 为空或包含不支持的字符，请检查服务器主机名。' >&2; exit 2; }
@@ -26,6 +26,7 @@ init)
   [[ ! -e "$INSTALL_DIR" ]] || { echo '安装目录已存在，拒绝覆盖。已有安装请使用 start。' >&2; exit 1; }
   umask 077
   mkdir -p "$INSTALL_DIR/conf" "$INSTALL_DIR/logs" "$INSTALL_DIR/worker-data" "$INSTALL_DIR/platform-data"
+  bash "$package_dir/init-sm4-key.sh" "$INSTALL_DIR/worker-data/sm4-export-keys.properties"
   docker run --rm -v "$INSTALL_DIR/conf:/opt/gateway/conf:Z" -v "$INSTALL_DIR/logs:/opt/gateway/logs:Z" "$proxy_image" init >/dev/null
   for example in "$INSTALL_DIR/conf"/database-*.yaml; do [[ ! -f "$example" ]] || mv "$example" "$example.disabled"; done
   control_user=gateway_control
