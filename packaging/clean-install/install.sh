@@ -12,9 +12,9 @@ source "$config"
 for ip in "$PLATFORM_BIND_IP" "$GATEWAY_BIND_IP"; do [[ "$ip" =~ ^[0-9a-fA-F:.]+$ ]] || { echo "监听 IP 格式错误：$ip；不能包含协议、空格或主机名。" >&2; exit 2; }; done
 for port in "$PLATFORM_PORT" "$WORKER_PORT" "$GATEWAY_PORT"; do [[ "$port" =~ ^[1-9][0-9]{3,4}$ && "$port" -ge 1024 && "$port" -le 65535 ]] || { echo "端口错误：$port；应为 1024～65535 的整数，不带前导零。" >&2; exit 2; }; done
 [[ "$PLATFORM_PORT" != "$WORKER_PORT" && "$PLATFORM_PORT" != "$GATEWAY_PORT" && "$WORKER_PORT" != "$GATEWAY_PORT" ]] || { echo '三个端口不能相同。' >&2; exit 2; }
-proxy_image=doris-security-gateway:sm4-export-20261019
-worker_image=doris-security-gateway-admin:sm4-export-20261019
-platform_image=doris-security-gateway-platform:sm4-export-20261019
+proxy_image=doris-security-gateway:sm4-row-v2-20261019
+worker_image=doris-security-gateway-admin:sm4-row-v2-20261019
+platform_image=doris-security-gateway-platform:sm4-row-v2-20261019
 for cmd in docker openssl ss hostname; do command -v "$cmd" >/dev/null || { echo "缺少命令：$cmd" >&2; exit 2; }; done
 gateway_host_name="$(hostname)"
 [[ "$gateway_host_name" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ && ${#gateway_host_name} -le 253 ]] || { echo '本机 hostname 为空或包含不支持的字符，请检查服务器主机名。' >&2; exit 2; }

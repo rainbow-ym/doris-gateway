@@ -73,6 +73,32 @@ class Sm4ExportTest {
   String fresh=(String)service.capture(request()).get("envelope");jdbc.update("UPDATE managed_objects SET generation_id='replacement'");
   assertThrows(SecurityException.class,()->service.decrypt(csv(fresh),"admin"));
  }
+ @Test void rowEncryptionCombinesFieldsAndAllowsWholeRowSorting()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();r.put("format","ROW_V2");
+  r.put("labels",Arrays.asList("证件号码","姓名"));r.put("displayed",Arrays.asList(Arrays.asList("same","张*"),Arrays.asList("same","李*")));
+  Map<String,Object> first=new LinkedHashMap<>();first.put("0","first-card");first.put("1","张三");
+  Map<String,Object> second=new LinkedHashMap<>();second.put("0","second-card");second.put("1","李四");r.put("originals",Arrays.asList(first,second));
+  List<?> encrypted=(List<?>)service.captureRows(r).get("envelopes");assertEquals(2,encrypted.size());
+  Map<?,?> payload=new ObjectMapper().readValue(Sm4ExportCodec.decrypt((String)encrypted.get(0),key),Map.class);
+  assertEquals(Collections.singletonList(first),payload.get("originals"));
+  String csv="证件号码,姓名,__gateway_sm4\r\nsame,李*,"+encrypted.get(1)+"\r\nsame,张*,"+encrypted.get(0)+"\r\n";
+  List<List<String>> restored=ExportCsv.parse((String)service.decryptRows(csv,"admin").get("csv"));
+  assertEquals(Arrays.asList("second-card","李四"),restored.get(1));assertEquals(Arrays.asList("first-card","张三"),restored.get(2));
+  assertThrows(IllegalArgumentException.class,()->service.decryptRows(csv.replace("same,李*","same,张*"),"admin"));
+ }
+ @Test void rowFormatAllowsAmbiguousMaskedDuplicatesAndRejectsLegacy()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();r.put("format","ROW_V2");r.put("displayed",Arrays.asList(Arrays.asList("x","y"),Arrays.asList("x","y")));
+  r.put("originals",Arrays.asList(Collections.singletonMap("0","first"),Collections.singletonMap("0","second")));
+  List<?> encrypted=(List<?>)service.captureRows(r).get("envelopes");
+  String csv="证件号码,备注,__gateway_sm4\r\nx,y,"+encrypted.get(1)+"\r\n";
+  assertEquals("second",ExportCsv.parse((String)service.decryptRows(csv,"admin").get("csv")).get(1).get(0));
+  assertThrows(IllegalArgumentException.class,()->service.decryptRows(csv((String)service.capture(request()).get("envelope")),"admin"));
+ }
+ @Test void rowFormatEmptyResultKeepsOnlyBusinessHeader()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();r.put("format","ROW_V2");r.put("displayed",Collections.emptyList());r.put("originals",Collections.emptyList());
+  assertTrue(((List<?>)service.captureRows(r).get("envelopes")).isEmpty());
+  assertEquals(1,ExportCsv.parse((String)service.decryptRows("证件号码,备注,__gateway_sm4\r\n","admin").get("csv")).size());
+ }
  @Test void csvLimitsAlsoApplyWithoutFinalNewline(){
   assertThrows(IllegalArgumentException.class,()->ExportCsv.parse(String.join(",",Collections.nCopies(257,"x"))));
   assertThrows(IllegalArgumentException.class,()->ExportCsv.parse(String.join("\n",Collections.nCopies(1003,"x"))));

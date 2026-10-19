@@ -1,0 +1,2 @@
+const mysql=require('/opt/scip-runtime/node_modules/mysql2/promise');
+(async()=>{const watchdog=setTimeout(()=>{console.error('Clean authentication timeout');process.exit(1);},20000);let c;try{c=await mysql.createConnection({host:'127.0.0.1',port:3318,user:process.env.PROXY_ADMIN_USER,password:process.env.PROXY_ADMIN_PASSWORD,connectTimeout:10000});console.log('PASS clean instance MySQL authentication (no logical databases onboarded)');}finally{if(c)c.destroy();clearTimeout(watchdog);}})().catch(e=>{console.error('Clean-instance check failed: '+e.code);process.exitCode=1;});

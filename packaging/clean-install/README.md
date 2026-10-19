@@ -1,6 +1,6 @@
 # 数据安全网关：全新安装包
 
-版本 2026.10.15-accounts.1，Linux x86_64。保留四类内置脱敏规则：证件号码、姓名、手机号、地址。**不包含现有数据源、密码、密钥、管理员账号、血缘、H2 数据库或自定义字段映射。** 不包含 Doris，需连接已有 Doris 集群。
+版本 2026.10.19-sm4-row-v2，Linux x86_64。保留四类内置脱敏规则：证件号码、姓名、手机号、地址。**不包含现有数据源、密码、密钥、管理员账号、血缘、H2 数据库或自定义字段映射。** 不包含 Doris，需连接已有 Doris 集群。SM4 逐行导出默认关闭，详见 SM4-EXPORT.md。
 
 ## 1. 环境与导入
 
@@ -10,7 +10,7 @@
 
 ```bash
 sha256sum -c SHA256SUMS
-gzip -dc doris-security-gateway-accounts-20261015-images.tar.gz | docker load
+gzip -dc doris-security-gateway-sm4-row-v2-20261019-images.tar.gz | docker load
 cp install.conf.example install.conf
 vi install.conf
 ```
@@ -58,4 +58,4 @@ INSTALL_DIR 默认 /data/doris-gateway-clean，配置文件权限仅允许 root 
 
 需要额外集群时，为独立实例选择不同目录、INSTANCE_NAME 和端口；每个 worker/proxy 使用独立数据。可在现有门户登记另一个 worker（本脚本每次会同时创建独立门户，暂不提供只创建 worker/proxy 的模式）。不要把同一个数据目录挂给多个实例。
 
-功能边界详见 RELEASE-20261015-accounts.md；其描述的 132 现有环境测试及备份路径不是本包携带的数据。
+本版功能边界、密钥和升级注意事项见 SM4-EXPORT.md。IMAGE-MANIFEST.txt 记录实际镜像 ID；验收报告中的服务器测试数据及备份不随包分发。

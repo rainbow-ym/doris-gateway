@@ -59,7 +59,7 @@ public class Sm4ExportService {
             for(Map<String,Object> row:originals)for(Map.Entry<String,Object> cell:row.entrySet()){
                 int index=Integer.parseInt(cell.getKey());if(index<0||index>=labels.size()||(cell.getValue()!=null&&!(cell.getValue() instanceof String)))throw new IllegalArgumentException("原值单元格格式无效。");
             }
-            validateTypes(request.get("types"),labels.size(),((Number)request.get("carrier")).intValue());
+            validateTypes(request.get("types"),labels.size(),"ROW_V2".equals(request.get("format"))?-1:((Number)request.get("carrier")).intValue());
             requireUnambiguousRows(displayed,originals);
             if(json.writeValueAsBytes(request).length>1024*1024)throw new IllegalArgumentException("导出缓冲超过 1 MiB，请缩小查询范围。");
             Map<String,Object> payload=new LinkedHashMap<>();String id=UUID.randomUUID().toString();long expires=System.currentTimeMillis()+((Number)policy.get("ttlMinutes")).longValue()*60000;
@@ -67,6 +67,7 @@ public class Sm4ExportService {
             payload.put("labels",labels);payload.put("originals",originals);payload.put("sources",bindSources(sources,false));payload.put("rows",displayed.size());
             payload.put("digest",digest(labels,displayed));payload.put("carrier",request.get("carrier"));
             payload.put("types",request.get("types"));
+            payload.put("format",request.get("format"));
             String envelope=Sm4ExportCodec.encrypt(json.writeValueAsBytes(payload),currentKey,key(currentKey));
             if(envelope.length()>30000)throw new IllegalArgumentException("SM4 密文超过单元格 30000 字符上限，请减少查询行数。");
             String packet=envelope.substring(envelope.lastIndexOf(':')+1);
@@ -75,7 +76,55 @@ public class Sm4ExportService {
             return Collections.singletonMap("envelope",envelope);
         }finally{slots.release();}
     }
-    @SuppressWarnings("unchecked") public Map<String,Object> decrypt(String csv,String administrator)throws Exception {
+    /** A batch contains independently authenticated rows; one row combines all protected cells. */
+    @org.springframework.transaction.annotation.Transactional(rollbackFor=Exception.class)
+    @SuppressWarnings("unchecked") public Map<String,Object> captureRows(Map<String,Object> request)throws Exception {
+        if(!"ROW_V2".equals(request.get("format")))throw new IllegalArgumentException("需要逐行密文协议，请配套升级 Proxy。");
+        if(json.writeValueAsBytes(request).length>1024*1024)throw new IllegalArgumentException("逐行加密请求超过 1 MiB。");
+        Map<String,Object> policy=profile(text(request,"username"),text(request,"database"));
+        if(!Boolean.TRUE.equals(policy.get("enabled")))throw new SecurityException("未启用逐行加密。");
+        access.resolve(text(request,"username"),text(request,"database"));
+        List<String> labels=(List<String>)request.get("labels");
+        List<List<String>> rows=(List<List<String>>)request.get("displayed");
+        List<Map<String,Object>> originals=(List<Map<String,Object>>)request.get("originals");
+        if(labels==null||labels.isEmpty()||labels.size()>255||rows==null||originals==null||rows.size()!=originals.size()||rows.size()>((Number)policy.get("maxRows")).intValue())throw new IllegalArgumentException("逐行结果结构或行数无效。");
+        for(String label:labels)if("__gateway_sm4".equalsIgnoreCase(label))throw new IllegalArgumentException("业务列不能使用保留列名 __gateway_sm4。");
+        validateTypes(request.get("types"),labels.size(),-1);
+        List<String> envelopes=new ArrayList<>();long size=0;
+        for(int i=0;i<rows.size();i++){
+            Map<String,Object> row=new LinkedHashMap<>(request);row.put("displayed",Collections.singletonList(rows.get(i)));row.put("originals",Collections.singletonList(originals.get(i)));row.put("carrier",0);
+            String envelope=(String)capture(row).get("envelope");size+=envelope.length();
+            if(size>768*1024)throw new IllegalArgumentException("逐行密文总量超过 768 KiB，请减少查询范围。");
+            envelopes.add(envelope);
+        }
+        return Collections.singletonMap("envelopes",envelopes);
+    }
+    public Map<String,Object> decryptRows(String csv,String administrator)throws Exception {
+        List<List<String>> input=ExportCsv.parse(csv);
+        if(input.isEmpty())throw new IllegalArgumentException("CSV 缺少表头。");
+        List<String> fullHeader=input.remove(0);
+        if(fullHeader.size()<2||!"__gateway_sm4".equals(fullHeader.get(fullHeader.size()-1)))throw new IllegalArgumentException("最后一列必须是 __gateway_sm4；不支持旧版末行文件。");
+        if(input.size()>1000)throw new IllegalArgumentException("CSV 超过 1000 行。");
+        List<String> labels=new ArrayList<>(fullHeader.subList(0,fullHeader.size()-1));
+        List<List<String>> output=new ArrayList<>();output.add(labels);
+        for(List<String> row:input){
+            if(row.size()!=fullHeader.size())throw new IllegalArgumentException("CSV 行列数不一致。");
+            List<String> displayed=new ArrayList<>(row.subList(0,labels.size()));
+            List<String> envelopeRow=new ArrayList<>(Collections.nCopies(labels.size(),""));envelopeRow.set(0,row.get(labels.size()));
+            // Use the existing receipt, identity, permission and authenticated content validation.
+            // This intermediate serialization must not apply spreadsheet formula escaping.
+            String single=rawCsv(Arrays.asList(labels,displayed,envelopeRow));
+            Map<String,Object> restored=decrypt(single,administrator,"ROW_V2");
+            output.add(ExportCsv.parse((String)restored.get("csv")).get(1));
+        }
+        Map<String,Object> result=new LinkedHashMap<>();result.put("csv",ExportCsv.write(output));result.put("filename","decrypted-rows-"+UUID.randomUUID()+".csv");result.put("rowCount",input.size());return result;
+    }
+    private static String rawCsv(List<List<String>> rows){
+        StringBuilder result=new StringBuilder();
+        for(List<String> row:rows){for(int i=0;i<row.size();i++){if(i>0)result.append(',');result.append('"').append(row.get(i).replace("\"","\"\"")).append('"');}result.append("\r\n");}return result.toString();
+    }
+    public Map<String,Object> decrypt(String csv,String administrator)throws Exception {return decrypt(csv,administrator,null);}
+    @SuppressWarnings("unchecked") private Map<String,Object> decrypt(String csv,String administrator,String requiredFormat)throws Exception {
         if(!slots.tryAcquire())throw new IllegalStateException("解密服务繁忙，请稍后重试。");
         String id="unverified";
         try{
@@ -85,6 +134,7 @@ public class Sm4ExportService {
             for(int i=0;i<trailer.size();i++)if(trailer.get(i).startsWith(Sm4ExportCodec.PREFIX)){if(carrier!=-1)throw new IllegalArgumentException("密文行存在多个附件。");carrier=i;envelope=trailer.get(i);}else if(!trailer.get(i).isEmpty())throw new IllegalArgumentException("密文行的占位单元格必须为空。");
             if(carrier<0)throw new IllegalArgumentException("未找到末行密文；请检查导出是否截断或丢失最后一行。");
             Map<String,Object> p=json.readValue(Sm4ExportCodec.decrypt(envelope,key(Sm4ExportCodec.keyId(envelope))),Map.class);id=text(p,"id");
+            if(requiredFormat!=null&&!requiredFormat.equals(p.get("format")))throw new IllegalArgumentException("不是逐行格式密文，请重新导出。");
             List<Map<String,Object>> receipts=jdbc.queryForList("SELECT * FROM sm4_export_receipts WHERE id=?",id);
             if(receipts.size()!=1||Boolean.TRUE.equals(receipts.get(0).get("revoked"))||((Number)p.get("expires")).longValue()<System.currentTimeMillis()
                     ||((Number)receipts.get(0).get("expires_at")).longValue()<System.currentTimeMillis())throw new SecurityException("密文不属于当前实例、已过期或已撤销。");
