@@ -3,7 +3,7 @@
 把新包解压到 `/data` 后，直接执行：
 
 ```bash
-bash /data/sm4-perf-oneclick-20261020/update.sh \
+bash /data/sm4-editable-oneclick-20261020/update.sh \
   --install-dir /data/doris-gateway/install_dir \
   --backup-dir /data/doris-gateway-backups
 ```
@@ -22,3 +22,11 @@ bash /data/sm4-perf-oneclick-20261020/update.sh \
 “更新完成”表示基础健康检查通过，不代表真实业务和 QPS 验收通过。
 完成后再测试 20/180/200 行及 5 用户并发。性能测试工具和详细手工步骤见 README-PERFORMANCE.md。
 此包的一键镜像标签为每次更新自动生成，因此无需照抄旧手工步骤中的固定镜像标签。
+
+## 更新后启用可编辑 CSV
+
+在 SM4 配置列表点“编辑”，填写“不可修改的记录标识列”（例如 record_id），保存并重新导出。
+标识必须出现在所有相关查询结果中，未脱敏、非空且唯一；留空仍用旧格式。
+新格式允许修改普通列；受保护列、记录标识、最后的密文列不能改内容或删除。
+旧文件仍按旧规则解密；新格式撤销范围是整次查询。详见 SM4-EDITABLE-CSV.md。
+过期解密记录自动清理，历史审计默认保留，不自动删除密钥。

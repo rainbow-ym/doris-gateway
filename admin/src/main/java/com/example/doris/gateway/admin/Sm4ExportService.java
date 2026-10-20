@@ -18,26 +18,36 @@ public class Sm4ExportService {
     private final JdbcTemplate jdbc;private final AdminStore store;private final AccountAccessService access;private final ObjectMapper json;
     @Value("${SM4_EXPORT_MAX_CONCURRENT:8}") private int maxConcurrent=8;
     private Semaphore slots;
+    @Value("${SM4_EXPORT_AUDIT_RETENTION_DAYS:0}") private int auditRetentionDays=0;
     @org.springframework.beans.factory.annotation.Autowired private ObjectIdentityProvider identities;
     @Value("${SM4_EXPORT_KEY_FILE:/opt/gateway-admin/data/sm4-export-keys.properties}") private String keyFile;
     @Value("${SM4_EXPORT_KEY_ID:v1}") private String currentKey;
     public Sm4ExportService(JdbcTemplate jdbc,AdminStore store,AccountAccessService access,ObjectMapper json){this.jdbc=jdbc;this.store=store;this.access=access;this.json=json;}
     @PostConstruct public void initialize(){
         if(maxConcurrent<1||maxConcurrent>64)throw new IllegalArgumentException("SM4_EXPORT_MAX_CONCURRENT 必须为 1—64。");
+        if(auditRetentionDays<0||auditRetentionDays>3650)throw new IllegalArgumentException("SM4_EXPORT_AUDIT_RETENTION_DAYS 必须为 0—3650；0 表示保留审计。");
         slots=new Semaphore(maxConcurrent);
         jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_profiles(username VARCHAR(128),database_name VARCHAR(255),enabled BOOLEAN NOT NULL,allow_decrypt BOOLEAN NOT NULL,max_rows INT NOT NULL,ttl_minutes INT NOT NULL,PRIMARY KEY(username,database_name))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_receipts(id VARCHAR(36) PRIMARY KEY,username VARCHAR(128),database_name VARCHAR(255),expires_at BIGINT NOT NULL,revoked BOOLEAN NOT NULL DEFAULT FALSE,row_count INT NOT NULL,nonce VARCHAR(64) NOT NULL UNIQUE)");
+        jdbc.execute("ALTER TABLE sm4_export_profiles ADD COLUMN IF NOT EXISTS row_key_column VARCHAR(255) NOT NULL DEFAULT ''");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_batches(id VARCHAR(36) PRIMARY KEY REFERENCES sm4_export_receipts(id) ON DELETE CASCADE,metadata CLOB NOT NULL)");
+        jdbc.execute("CREATE INDEX IF NOT EXISTS sm4_export_expiry ON sm4_export_receipts(expires_at)");
+        if(auditRetentionDays>0)jdbc.execute("CREATE INDEX IF NOT EXISTS sm4_audit_retention ON audit_log(action,created_at)");
+
     }
-    public List<Map<String,Object>> profiles(){return jdbc.queryForList("SELECT username,database_name AS databaseName,enabled,allow_decrypt AS allowDecrypt,max_rows AS maxRows,ttl_minutes AS ttlMinutes FROM sm4_export_profiles ORDER BY username,database_name");}
+    public List<Map<String,Object>> profiles(){return jdbc.queryForList("SELECT username,database_name AS databaseName,enabled,allow_decrypt AS allowDecrypt,max_rows AS maxRows,ttl_minutes AS ttlMinutes,row_key_column AS rowKeyColumn FROM sm4_export_profiles ORDER BY username,database_name");}
     public Map<String,Object> profile(String user,String db){
-        List<Map<String,Object>> rows=jdbc.queryForList("SELECT enabled,allow_decrypt AS allowDecrypt,max_rows AS maxRows,ttl_minutes AS ttlMinutes FROM sm4_export_profiles WHERE username=? AND database_name=?",user,db);
+        List<Map<String,Object>> rows=jdbc.queryForList("SELECT enabled,allow_decrypt AS allowDecrypt,max_rows AS maxRows,ttl_minutes AS ttlMinutes,row_key_column AS rowKeyColumn FROM sm4_export_profiles WHERE username=? AND database_name=?",user,db);
         return rows.isEmpty()?Collections.singletonMap("enabled",false):rows.get(0);
     }
     public void save(Map<String,Object> r)throws Exception {
         String user=text(r,"username"),db=text(r,"databaseName");access.resolve(user,db);
         int rows=number(r,"maxRows",200,1,1000),ttl=number(r,"ttlMinutes",60,1,1440);
+        Object supplied=r.containsKey("rowKeyColumn")?r.get("rowKeyColumn"):profile(user,db).getOrDefault("rowKeyColumn","");
+        if(!(supplied instanceof String)||((String)supplied).length()>255||"__gateway_sm4".equalsIgnoreCase((String)supplied))throw new IllegalArgumentException("记录标识列无效。");
+        String anchor=(String)supplied;
         if(Boolean.TRUE.equals(r.get("enabled")))key(currentKey);
-        jdbc.update("MERGE INTO sm4_export_profiles(username,database_name,enabled,allow_decrypt,max_rows,ttl_minutes) KEY(username,database_name) VALUES(?,?,?,?,?,?)",user,db,Boolean.TRUE.equals(r.get("enabled")),Boolean.TRUE.equals(r.get("allowDecrypt")),rows,ttl);
+        jdbc.update("MERGE INTO sm4_export_profiles(username,database_name,enabled,allow_decrypt,max_rows,ttl_minutes,row_key_column) KEY(username,database_name) VALUES(?,?,?,?,?,?,?)",user,db,Boolean.TRUE.equals(r.get("enabled")),Boolean.TRUE.equals(r.get("allowDecrypt")),rows,ttl,anchor);
         store.audit("SM4_EXPORT_PROFILE_CHANGED","user="+user+",database="+db+",enabled="+Boolean.TRUE.equals(r.get("enabled"))+",decrypt="+Boolean.TRUE.equals(r.get("allowDecrypt")));
     }
     private byte[] key(String id)throws Exception {
@@ -112,7 +122,9 @@ public class Sm4ExportService {
         if(sources==null||sources.isEmpty()||sources.size()>256)throw new IllegalArgumentException("导出来源无效。");
         // Reuse only within this request: later queries must recheck identity and authorization.
         List<Map<String,String>> boundSources=bindSources(sources,false);
-        byte[] encryptionKey=key(currentKey);List<Object[]> receipts=new ArrayList<>();
+        byte[] encryptionKey=key(currentKey);
+        if(!String.valueOf(policy.getOrDefault("rowKeyColumn","")).isEmpty())return captureEditable(request,policy,account,boundSources,encryptionKey);
+        List<Object[]> receipts=new ArrayList<>();
         List<String> envelopes=new ArrayList<>();long size=0;
         for(int i=0;i<rows.size();i++){
             Map<String,Object> row=new LinkedHashMap<>(request);row.put("displayed",Collections.singletonList(rows.get(i)));row.put("originals",Collections.singletonList(originals.get(i)));row.put("carrier",0);
@@ -130,6 +142,15 @@ public class Sm4ExportService {
         List<String> fullHeader=input.remove(0);
         if(fullHeader.size()<2||!"__gateway_sm4".equals(fullHeader.get(fullHeader.size()-1)))throw new IllegalArgumentException("最后一列必须是 __gateway_sm4；不支持旧版末行文件。");
         if(input.size()>1000)throw new IllegalArgumentException("CSV 超过 1000 行。");
+        if(!input.isEmpty()){
+            List<String> first=input.get(0);
+            if(first.size()!=fullHeader.size())throw new IllegalArgumentException("CSV 行列数不一致。");
+            String envelope=first.get(first.size()-1);
+            Map<?,?> packet;
+            try{packet=json.readValue(Sm4ExportCodec.decrypt(envelope,key(Sm4ExportCodec.keyId(envelope))),Map.class);}
+            catch(Exception e){store.audit("SM4_EXPORT_DECRYPT_DENIED","id=unverified,administrator="+administrator);throw e;}
+            if(Integer.valueOf(3).equals(packet.get("v")))return decryptEditable(fullHeader,input,administrator);
+        }
         List<String> labels=new ArrayList<>(fullHeader.subList(0,fullHeader.size()-1));
         List<List<String>> output=new ArrayList<>();output.add(labels);
         for(List<String> row:input){
@@ -143,6 +164,144 @@ public class Sm4ExportService {
             output.add(ExportCsv.parse((String)restored.get("csv")).get(1));
         }
         Map<String,Object> result=new LinkedHashMap<>();result.put("csv",ExportCsv.write(output));result.put("filename","decrypted-rows-"+UUID.randomUUID()+".csv");result.put("rowCount",input.size());return result;
+    }
+    @SuppressWarnings("unchecked")
+    private Map<String,Object> captureEditable(Map<String,Object> request,Map<String,Object> policy,
+            Map<String,Object> account,List<Map<String,String>> sources,byte[] encryptionKey)throws Exception {
+        List<String> labels=(List<String>)request.get("labels");
+        List<List<String>> rows=(List<List<String>>)request.get("displayed");
+        List<Map<String,Object>> originals=(List<Map<String,Object>>)request.get("originals");
+        uniqueLabels(labels);
+        String anchor=String.valueOf(policy.get("rowKeyColumn"));int anchorIndex=labels.indexOf(anchor);
+        if(anchorIndex<0)throw new IllegalArgumentException("可编辑导出必须包含记录标识列："+anchor);
+        if(rows.isEmpty())return Collections.singletonMap("envelopes",Collections.emptyList());
+        List<Integer> protectedIndexes=new ArrayList<>();
+        for(String index:originals.get(0).keySet()){
+            int column=Integer.parseInt(index);
+            if(column<0||column>=labels.size()||!String.valueOf(column).equals(index))throw new IllegalArgumentException("保护字段位置无效。");
+            if(column==anchorIndex)throw new IllegalArgumentException("记录标识列必须是未脱敏的唯一业务编号。");
+            protectedIndexes.add(column);
+        }
+        Collections.sort(protectedIndexes);
+        if(protectedIndexes.isEmpty())throw new IllegalArgumentException("缺少需要恢复的保护字段。");
+        List<String> protectedLabels=new ArrayList<>();
+        for(int column:protectedIndexes)protectedLabels.add(labels.get(column));
+        List<String> checkedLabels=new ArrayList<>();checkedLabels.add(anchor);checkedLabels.addAll(protectedLabels);
+        String id=UUID.randomUUID().toString();long expires=System.currentTimeMillis()+((Number)policy.get("ttlMinutes")).longValue()*60000;
+        Map<String,Object> metadata=new LinkedHashMap<>();
+        metadata.put("id",id);metadata.put("username",request.get("username"));metadata.put("database",request.get("database"));
+        metadata.put("expires",expires);metadata.put("epoch",account.get("epoch"));metadata.put("sources",sources);
+        metadata.put("checkedLabels",checkedLabels);
+        // Common metadata is authenticated and stored once; no original or displayed cell values are stored.
+        String metadataEnvelope=Sm4ExportCodec.encrypt(json.writeValueAsBytes(metadata),currentKey,encryptionKey);
+        if(metadataEnvelope.length()>30000)throw new IllegalArgumentException("导出来源元数据过大，请减少查询字段。");
+        Set<String> anchors=new HashSet<>();List<String> envelopes=new ArrayList<>();long size=0;
+        for(int r=0;r<rows.size();r++){
+            List<String> row=rows.get(r);Map<String,Object> original=originals.get(r);
+            if(row.size()!=labels.size()||!original.keySet().equals(originals.get(0).keySet()))throw new IllegalArgumentException("结果列或保护字段不一致。");
+            String identity=row.get(anchorIndex);
+            if(identity==null||identity.isEmpty()||!anchors.add(identity))throw new IllegalArgumentException("记录标识列必须非空且在本次结果中唯一。");
+            List<Object> raw=new ArrayList<>();
+            for(int column:protectedIndexes){
+                Object value=original.get(String.valueOf(column));
+                if(value!=null&&!(value instanceof String))throw new IllegalArgumentException("原值格式无效。");
+                raw.add(value);
+            }
+            Map<String,Object> packet=new LinkedHashMap<>();
+            packet.put("v",3);packet.put("b",id);packet.put("r",r);packet.put("o",raw);
+            packet.put("d",digest(checkedLabels,Collections.singletonList(selectColumns(labels,row,checkedLabels))));
+            String envelope=Sm4ExportCodec.encrypt(json.writeValueAsBytes(packet),currentKey,encryptionKey);
+            size+=envelope.length();
+            if(envelope.length()>30000||size>768*1024)throw new IllegalArgumentException("逐行密文大小超限，请减少查询范围。");
+            envelopes.add(envelope);
+        }
+        persistReceipts(Collections.singletonList(new Object[]{id,request.get("username"),request.get("database"),expires,rows.size(),id}));
+        jdbc.update("INSERT INTO sm4_export_batches(id,metadata) VALUES(?,?)",id,metadataEnvelope);
+        return Collections.singletonMap("envelopes",envelopes);
+    }
+    private static void uniqueLabels(List<String> labels){
+        if(labels.contains("")||labels.contains(null)||new HashSet<>(labels).size()!=labels.size())
+            throw new IllegalArgumentException("可编辑 CSV 的表头必须非空且不能重名，请给查询列设置唯一别名。");
+    }
+    private static List<String> selectColumns(List<String> labels,List<String> row,List<String> selected){
+        List<String> values=new ArrayList<>();
+        for(String label:selected){
+            int index=labels.indexOf(label);
+            if(index<0)throw new IllegalArgumentException("受保护列或记录标识列被删除、改名："+label);
+            values.add(row.get(index));
+        }
+        return values;
+    }
+    @SuppressWarnings("unchecked")
+    private Map<String,Object> decryptEditable(List<String> header,List<List<String>> input,String administrator)throws Exception {
+        if(!slots.tryAcquire())throw new IllegalStateException("解密服务繁忙，请稍后重试。");
+        String batch="unverified";
+        try{
+            uniqueLabels(header);List<String> labels=new ArrayList<>(header.subList(0,header.size()-1));
+            List<List<String>> output=new ArrayList<>();output.add(labels);
+            Map<String,byte[]> keys=new HashMap<>();Map<String,Object> metadata=null;
+            List<String> checkedLabels=null;Set<Integer> seen=new HashSet<>();int total=0;
+            for(List<String> row:input){
+                if(row.size()!=header.size())throw new IllegalArgumentException("CSV 行列数不一致。");
+                String envelope=row.get(row.size()-1),version=Sm4ExportCodec.keyId(envelope);
+                if(!keys.containsKey(version))keys.put(version,key(version));
+                Map<String,Object> packet=json.readValue(Sm4ExportCodec.decrypt(envelope,keys.get(version)),Map.class);
+                if(!Integer.valueOf(3).equals(packet.get("v")))throw new IllegalArgumentException("不能混合新旧格式文件。");
+                String id=text(packet,"b");
+                if(metadata==null){
+                    batch=id;
+                    List<Map<String,Object>> records=jdbc.queryForList("SELECT r.*,b.metadata FROM sm4_export_receipts r JOIN sm4_export_batches b ON b.id=r.id WHERE r.id=?",id);
+                    if(records.size()!=1||Boolean.TRUE.equals(records.get(0).get("revoked"))
+                            ||((Number)records.get(0).get("expires_at")).longValue()<System.currentTimeMillis())
+                        throw new SecurityException("查询批次已过期、撤销或不存在。");
+                    String saved=String.valueOf(records.get(0).get("metadata")),savedVersion=Sm4ExportCodec.keyId(saved);
+                    if(!keys.containsKey(savedVersion))keys.put(savedVersion,key(savedVersion));
+                    metadata=json.readValue(Sm4ExportCodec.decrypt(saved,keys.get(savedVersion)),Map.class);
+                    if(!id.equals(metadata.get("id"))||((Number)metadata.get("expires")).longValue()<System.currentTimeMillis())
+                        throw new SecurityException("查询批次身份或有效期无效。");
+                    String user=text(metadata,"username"),db=text(metadata,"database");Map<String,Object> policy=profile(user,db);
+                    if(!Boolean.TRUE.equals(policy.get("enabled"))||!Boolean.TRUE.equals(policy.get("allowDecrypt")))throw new SecurityException("该账号当前没有明文解密授权。");
+                    Map<String,Object> account=access.resolve(user,db);
+                    if(!Objects.equals(String.valueOf(account.get("epoch")),String.valueOf(metadata.get("epoch"))))throw new SecurityException("原账号凭据版本已变化。");
+                    checkPermissions(account,bindSources((List<Map<String,String>>)metadata.get("sources"),true));
+                    checkedLabels=(List<String>)metadata.get("checkedLabels");
+                    total=((Number)records.get(0).get("row_count")).intValue();
+                }
+                if(!batch.equals(id))throw new IllegalArgumentException("不能混合不同查询批次的密文。");
+                Object ordinal=packet.get("r");
+                if(!(ordinal instanceof Integer)||(Integer)ordinal<0||(Integer)ordinal>=total||!seen.add((Integer)ordinal))
+                    throw new IllegalArgumentException("密文行重复或行标识无效。");
+                List<String> checked=selectColumns(labels,row,checkedLabels);
+                if(!digest(checkedLabels,Collections.singletonList(checked)).equals(packet.get("d")))
+                    throw new IllegalArgumentException("受保护内容或记录标识被修改，或密文被放到其他记录；拒绝还原。");
+                List<Object> raw=(List<Object>)packet.get("o");
+                if(raw.size()!=checkedLabels.size()-1)throw new IllegalArgumentException("密文保护字段结构无效。");
+                List<String> restored=new ArrayList<>(row.subList(0,labels.size()));
+                for(int i=0;i<raw.size();i++)restored.set(labels.indexOf(checkedLabels.get(i+1)),raw.get(i)==null?"":String.valueOf(raw.get(i)));
+                output.add(restored);
+            }
+            // Recheck revocation and expiry before releasing any plaintext.
+            if(jdbc.queryForObject("SELECT COUNT(*) FROM sm4_export_receipts WHERE id=? AND revoked=FALSE AND expires_at>=?",Integer.class,batch,System.currentTimeMillis())!=1)
+                throw new SecurityException("查询批次已过期或撤销。");
+            Map<String,Object> currentPolicy=profile(text(metadata,"username"),text(metadata,"database"));
+            Map<String,Object> currentAccount=access.resolve(text(metadata,"username"),text(metadata,"database"));
+            if(!Boolean.TRUE.equals(currentPolicy.get("enabled"))||!Boolean.TRUE.equals(currentPolicy.get("allowDecrypt"))
+                    ||!Objects.equals(String.valueOf(currentAccount.get("epoch")),String.valueOf(metadata.get("epoch"))))
+                throw new SecurityException("解密期间账号授权已变化。");
+            checkPermissions(currentAccount,bindSources((List<Map<String,String>>)metadata.get("sources"),true));
+            store.audit("SM4_EXPORT_DECRYPTED","id="+batch+",administrator="+administrator+",rows="+input.size());
+            Map<String,Object> result=new LinkedHashMap<>();result.put("csv",ExportCsv.write(output));
+            result.put("filename","decrypted-editable-"+UUID.randomUUID()+".csv");result.put("rowCount",input.size());return result;
+        }catch(Exception e){store.audit("SM4_EXPORT_DECRYPT_DENIED","id="+batch+",administrator="+administrator);throw e;}
+        finally{slots.release();}
+    }
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelayString="${SM4_EXPORT_CLEANUP_MS:60000}")
+    public void cleanupExpiredExports(){
+        // Bound each pass; cascade removes batch metadata, never keys or unexpired files.
+        jdbc.update("DELETE FROM sm4_export_receipts WHERE id IN (SELECT id FROM sm4_export_receipts WHERE expires_at<? ORDER BY expires_at LIMIT 10000)",System.currentTimeMillis());
+        if(auditRetentionDays==0)return;
+        String cutoff=java.time.Instant.now().minus(java.time.Duration.ofDays(auditRetentionDays)).toString();
+        jdbc.update("DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log WHERE action IN ('SM4_EXPORT_CAPTURED','SM4_EXPORT_DECRYPTED','SM4_EXPORT_DECRYPT_DENIED') AND created_at<? LIMIT 10000)",cutoff);
     }
     private static String rawCsv(List<List<String>> rows){
         StringBuilder result=new StringBuilder();
@@ -230,7 +389,7 @@ public class Sm4ExportService {
             if((!text&&!numeric)||(i==carrier&&!text))throw new IllegalArgumentException("结果列或密文承载列类型不支持。");
         }
     }
-    public List<Map<String,Object>> receipts(){return jdbc.queryForList("SELECT id,username,database_name AS databaseName,expires_at AS expiresAt,revoked,row_count AS rowCount FROM sm4_export_receipts ORDER BY expires_at DESC LIMIT 100");}
+    public List<Map<String,Object>> receipts(){return jdbc.queryForList("SELECT r.id,r.username,r.database_name AS databaseName,r.expires_at AS expiresAt,r.revoked,r.row_count AS rowCount,CASE WHEN b.id IS NULL THEN '单行（旧格式）' ELSE '整次查询' END AS revokeScope FROM sm4_export_receipts r LEFT JOIN sm4_export_batches b ON b.id=r.id ORDER BY r.expires_at DESC LIMIT 100");}
     public void revoke(String id){jdbc.update("UPDATE sm4_export_receipts SET revoked=TRUE WHERE id=?",id);store.audit("SM4_EXPORT_REVOKED","id="+id);}
     private String digest(List<String> labels,List<List<String>> rows)throws Exception{return Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(json.writeValueAsBytes(Arrays.asList(labels,rows))));}
     private static String text(Map<String,Object> r,String k){Object v=r.get(k);if(!(v instanceof String)||((String)v).isEmpty()||((String)v).length()>255)throw new IllegalArgumentException("缺少有效参数："+k);return (String)v;}
