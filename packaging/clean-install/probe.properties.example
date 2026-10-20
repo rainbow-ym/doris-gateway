@@ -1,0 +1,24 @@
+# Five distinct, already-authorized Doris users. Keep the real file private.
+# UTF-8 Java Properties: escape literal backslash as \\ and leading space as \ .
+iterations=10
+expectedRows=180
+url.1=jdbc:mysql://127.0.0.1:3308/REPLACE_LOGICAL_DATABASE?useSSL=false&allowPublicKeyRetrieval=true
+user.1=REPLACE_USER_1
+password.1=REPLACE_PASSWORD_1
+sql.1=query1.sql
+url.2=jdbc:mysql://127.0.0.1:3308/REPLACE_LOGICAL_DATABASE?useSSL=false&allowPublicKeyRetrieval=true
+user.2=REPLACE_USER_2
+password.2=REPLACE_PASSWORD_2
+sql.2=query2.sql
+url.3=jdbc:mysql://127.0.0.1:3308/REPLACE_LOGICAL_DATABASE?useSSL=false&allowPublicKeyRetrieval=true
+user.3=REPLACE_USER_3
+password.3=REPLACE_PASSWORD_3
+sql.3=query3.sql
+url.4=jdbc:mysql://127.0.0.1:3308/REPLACE_LOGICAL_DATABASE?useSSL=false&allowPublicKeyRetrieval=true
+user.4=REPLACE_USER_4
+password.4=REPLACE_PASSWORD_4
+sql.4=query4.sql
+url.5=jdbc:mysql://127.0.0.1:3308/REPLACE_LOGICAL_DATABASE?useSSL=false&allowPublicKeyRetrieval=true
+user.5=REPLACE_USER_5
+password.5=REPLACE_PASSWORD_5
+sql.5=query5.sql
