@@ -175,6 +175,7 @@ def main():
     s.add_argument('--platform-image',help='同时冷备平台数据，并在 accept 时保留原挂载和凭据升级平台。')
     for name in ('accept','rollback'):
         a=sub.add_parser(name);a.add_argument('--state',required=True);a.add_argument('--business-verified',action='store_true')
+        if name=='accept':a.add_argument('--automatic-health-check',action='store_true',help='自动健康检查后开放业务，不代表已执行真实业务验收。')
     args=p.parse_args()
     if args.action=='stage':
         if not args.maintenance_confirmed:raise RuntimeError('必须明确安排维护窗口并指定 --maintenance-confirmed；会停止业务连接。')
@@ -183,7 +184,8 @@ def main():
     path=os.path.realpath(args.state)
     with open(path) as f:state=json.load(f)
     if args.action=='rollback':restore(state,path);return
-    if state['phase']!='STAGED' or not args.business_verified:raise RuntimeError('必须完成隔离业务验证并指定 --business-verified。')
+    if state['phase']!='STAGED' or not (args.business_verified or args.automatic_health_check):raise RuntimeError('必须指定业务验收或自动健康检查模式。')
+    if args.automatic_health_check:print('自动更新：按策略和服务健康检查开放业务，未执行真实业务 SQL 验收。')
     check_policies(state,False);state['phase']='ACCEPTING';save(state,path)
     for kind in ('proxy','worker'):
         name=state[kind]['Name'].lstrip('/');docker('stop',name);docker('rename',name,name+'-verified-'+state['id'])
