@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>加解密运行监控 · 独立预览</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+<header><div><p class="eyebrow">GATEWAY / OBSERVABILITY</p><h1>加解密运行监控</h1></div><span class="badge">第一阶段 · 模拟数据</span></header>
+<aside>此页面未连接真实集群。所有请求、耗时及数据规模均为测试样例，不代表生产性能。无配置修改、发布或解密操作。</aside>
+<section class="filters" aria-label="筛选"><label>集群<select id="cluster"><option value="demo-a">模拟集群 A</option><option value="demo-b">模拟集群 B</option></select></label><label>操作<select id="operation"><option value="">全部操作</option><option value="ENCRYPT_QUERY">加密查询</option><option value="DECRYPT_FILE">文件解密</option></select></label><label>请求结果<select id="outcome"><option value="">全部结果</option><option value="SUCCESS">成功</option><option value="SECURITY_DENIED">安全拒绝</option><option value="DEPENDENCY_ERROR">依赖故障</option><option value="INTERNAL_ERROR">内部异常</option><option value="BUSY">繁忙拒绝</option><option value="CANCELLED">客户端取消</option></select></label><button id="refresh">刷新样例</button></section>
+<p id="error" role="alert"></p><section id="cards" class="cards" aria-label="指标概览"></section>
+<p class="note">统计范围：当前集群及操作的固定模拟样本；结果筛选仅作用于下方列表。分位数为样本演示，非实时监控。</p>
+<section class="panel"><h2>资源与采集状态</h2><p>JVM / 容器 CPU / 内存 / GC / 连接池：<strong>未接入</strong>　历史趋势：<strong>未接入</strong></p><p class="note">真实接入后提供采样、丢弃数量和采集状态；不会将缺失数据解释为运行正常。</p></section>
+<section class="panel"><h2>请求诊断</h2><div class="table-wrap"><table><thead><tr><th>请求编号</th><th>操作</th><th>结果</th><th>耗时</th><th>行数</th><th>详情</th></tr></thead><tbody id="rows"></tbody></table></div><div class="pager"><span id="pageInfo"></span><button id="prev">上一页</button><button id="next">下一页</button></div></section>
+</main><dialog id="detail"><header><h2>请求诊断详情</h2><button id="close" aria-label="关闭详情">关闭</button></header><div id="detailBody"></div></dialog><script type="module" src="/app.js"></script></body></html>

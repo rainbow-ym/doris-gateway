@@ -1,0 +1,35 @@
+import {createRequire} from 'node:module';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {mkdir} from 'node:fs/promises';
+import {createServer} from './server.mjs';
+const require=createRequire(import.meta.url);
+const {chromium}=require(process.env.PLAYWRIGHT_PATH||path.join(path.dirname(process.execPath),'../node_modules/playwright'));
+const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));
+let browser;
+try {
+  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+  const page=await browser.newPage({viewport:{width:1360,height:1000}}),errors=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length===10);
+  assert.match(await page.locator('aside').innerText(),/未连接真实集群/);
+  await page.getByRole('button',{name:'下一页'}).click();
+  await page.waitForFunction(()=>document.querySelector('#pageInfo').textContent.includes('第 2'));
+  await page.getByRole('button',{name:'查看详情'}).first().click();
+  await page.waitForSelector('dialog[open]');assert.match(await page.locator('#detailBody').innerText(),/不可累加/);
+  await mkdir(new URL('../target/',import.meta.url),{recursive:true});
+  await page.screenshot({path:fileURLToPath(new URL('../target/preview-detail.png',import.meta.url)),fullPage:true});
+  await page.getByRole('button',{name:'关闭详情'}).click();
+  await page.selectOption('#cluster','demo-b');
+  await page.waitForFunction(()=>document.querySelector('#pageInfo').textContent.includes('第 1'));
+  await page.selectOption('#outcome','SECURITY_DENIED');
+  await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length===8);
+  assert.ok((await page.locator('#rows').innerText()).includes('权限不足'));
+  await page.screenshot({path:fileURLToPath(new URL('../target/preview-list.png',import.meta.url)),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+  assert.deepEqual(errors,[]);
+  console.log('PASS: browser load, paging, modal, cluster reset, outcome filter, narrow viewport, no JS errors');
+} finally {if(browser)await browser.close();await new Promise(r=>server.close(r));}
