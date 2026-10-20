@@ -25,37 +25,45 @@ public final class Sm4ExportRows {
         try{
             Map<String,Object> policy=JSON.readValue(LineageEventEmitter.accountRequest("export-policy",user,db),Map.class);
             if(!Boolean.TRUE.equals(policy.get("enabled")))return null;
-            if(!SLOTS.tryAcquire())throw new SQLException("末行加密查询繁忙，请稍后重试。","HY000");
+            if(!SLOTS.tryAcquire())throw new SQLException("逐行加密查询繁忙，请稍后重试。","HY000");
             try{return collect(merged,headers,user,db,((Number)policy.get("maxRows")).intValue());}catch(Exception e){SLOTS.release();throw e;}
-        }catch(SQLException e){throw e;}catch(Exception e){throw new SQLException("末行 SM4 加密失败，未返回结果："+e.getMessage(),"HY000");}
+        }catch(SQLException e){throw e;}catch(Exception e){throw new SQLException("逐行 SM4 加密失败，未返回结果："+e.getMessage(),"HY000");}
     }
     private static Sm4ExportRows collect(MaskMergedResult merged,List<QueryHeader> headers,String user,String db,int maxRows)throws Exception {
-        if(headers.size()>256)throw new SQLException("末行加密最多支持 256 列。");
-        List<String> labels=new ArrayList<>();int carrier=-1;
+        if(headers.size()>255)throw new SQLException("逐行加密最多支持 255 个业务列。");
+        List<String> labels=new ArrayList<>();List<Integer> types=new ArrayList<>();
         for(int i=0;i<headers.size();i++){
-            QueryHeader h=headers.get(i);labels.add(h.getColumnLabel());int t=h.getColumnType();
+            QueryHeader h=headers.get(i);labels.add(h.getColumnLabel());int t=h.getColumnType();types.add(t);
             boolean text=t==Types.CHAR||t==Types.VARCHAR||t==Types.LONGVARCHAR||t==Types.NCHAR||t==Types.NVARCHAR||t==Types.LONGNVARCHAR;
             boolean number=t==Types.TINYINT||t==Types.SMALLINT||t==Types.INTEGER||t==Types.BIGINT||t==Types.NUMERIC||t==Types.DECIMAL;
-            if(!text&&!number)throw new SQLException("末行加密当前仅支持文本、整数和定点数列；请缩小查询字段范围。");
-            if(text&&carrier<0)carrier=i;
+            if(!text&&!number)throw new SQLException("逐行加密当前仅支持文本、整数和定点数列；请缩小查询字段范围。");
+            if("__gateway_sm4".equalsIgnoreCase(h.getColumnLabel()))throw new SQLException("结果已包含保留列 __gateway_sm4，请使用其他别名。");
         }
-        if(carrier<0)throw new SQLException("结果没有可承载密文的文本列。");
         List<Object[]> buffered=new ArrayList<>();List<List<String>> displayed=new ArrayList<>();List<Map<String,Object>> originals=new ArrayList<>();long bytes=0;
         while(merged.next()){
-            if(buffered.size()>=Math.min(1000,maxRows))throw new SQLException("末行加密查询行数超限，请增加过滤条件或减少 LIMIT。");
-            Object[] data=new Object[headers.size()];List<String> view=new ArrayList<>();Map<String,Object> original=new LinkedHashMap<>();
+            if(buffered.size()>=Math.min(1000,maxRows))throw new SQLException("逐行加密查询行数超限，请增加过滤条件或减少 LIMIT。");
+            Object[] data=new Object[headers.size()+1];List<String> view=new ArrayList<>();Map<String,Object> original=new LinkedHashMap<>();
             for(int i=0;i<headers.size();i++){
                 data[i]=merged.getValue(i+1,Object.class);String v=canonical(data[i]);view.add(v);bytes+=v.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
                 if(merged.isExportProtected(i+1)){Object raw=merged.exportOriginalValue(i+1);String rawText=raw==null?null:canonical(raw);original.put(String.valueOf(i),rawText);if(rawText!=null)bytes+=rawText.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;}
-                if(bytes>512*1024)throw new SQLException("末行加密缓冲超限，请减少查询范围。");
+                if(bytes>512*1024)throw new SQLException("逐行加密缓冲超限，请减少查询范围。");
             }
             buffered.add(data);displayed.add(view);originals.add(original);
         }
-        Map<String,Object> request=new LinkedHashMap<>();request.put("username",user);request.put("database",db);request.put("labels",labels);request.put("displayed",displayed);request.put("originals",originals);request.put("sources",merged.exportSources());request.put("carrier",carrier);
-        String encoded=JSON.writeValueAsString(request);if(encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>1024*1024)throw new SQLException("末行加密请求超过 1 MiB。");
-        Map<?,?> response=JSON.readValue(LineageEventEmitter.captureExport(encoded),Map.class);String envelope=String.valueOf(response.get("envelope"));
-        if(!envelope.startsWith("__GW_SM4_V1__:")||envelope.length()>30000)throw new SQLException("控制面未返回有效 SM4 附件。");
-        Object[] trailer=new Object[headers.size()];trailer[carrier]=envelope;buffered.add(trailer);
+        Map<String,Object> request=new LinkedHashMap<>();request.put("username",user);request.put("database",db);request.put("labels",labels);request.put("displayed",displayed);request.put("originals",originals);request.put("sources",merged.exportSources());request.put("format","ROW_V2");
+        request.put("types",types);
+        String encoded=JSON.writeValueAsString(request);if(encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>1024*1024)throw new SQLException("逐行加密请求超过 1 MiB。");
+        Map<?,?> response=JSON.readValue(LineageEventEmitter.captureExport(encoded),Map.class);
+        Object supplied=response.get("envelopes");
+        if(!(supplied instanceof List)||((List<?>)supplied).size()!=buffered.size())throw new SQLException("控制面未返回逐行 SM4 密文，请配套升级服务。");
+        long encryptedBytes=0;
+        for(int i=0;i<buffered.size();i++){
+            String envelope=String.valueOf(((List<?>)supplied).get(i));
+            if(!envelope.startsWith("__GW_SM4_V1__:")||envelope.length()>30000)throw new SQLException("控制面未返回有效 SM4 密文。");
+            encryptedBytes+=envelope.length();if(encryptedBytes>768*1024)throw new SQLException("逐行密文总量超限，请减少查询范围。");
+            buffered.get(i)[headers.size()]=envelope;
+        }
+        headers.add(new QueryHeader("","","__gateway_sm4","__gateway_sm4",Types.VARCHAR,"VARCHAR",30000,0,false,false,false,false));
         return new Sm4ExportRows(buffered);
     }
     static String canonical(Object value)throws SQLException {

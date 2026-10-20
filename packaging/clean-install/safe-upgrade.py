@@ -61,6 +61,7 @@ def validate(info,expected):
     mounts=info.get('Mounts',[])
     destinations={m['Destination'] for m in mounts}
     inherited={'/opt/gateway/conf','/opt/gateway/logs'} if set(expected)=={'/opt/gateway-admin/data'} else set()
+    if set(expected)=={'/opt/gateway-platform/data'}:inherited={'/opt/gateway/conf','/opt/gateway/logs','/opt/gateway-admin/data'}
     if not set(expected).issubset(destinations) or destinations-set(expected)-inherited:raise RuntimeError('容器挂载布局不符合已验证版本，拒绝自动重建。')
     for m in mounts:
         path=m['Source']
@@ -125,7 +126,13 @@ def stage(args):
     if not args.platform and not args.no_platform:raise RuntimeError('必须指定平台容器，或明确此实例没有平台。')
     root=os.path.realpath(args.backup_root)
     if not os.path.isdir(root) or root.count('/')<2:raise RuntimeError('备份根目录必须预先创建为专用目录。')
+    platform=inspect(args.platform) if args.platform else None
+    if args.platform_image:
+        if not platform:raise RuntimeError('升级平台镜像必须指定 --platform。')
+        validate(platform,{'/opt/gateway-platform/data'})
+        inspect(args.platform_image)
     paths=[m['Source'] for i in (worker,proxy) for m in i['Mounts']]
+    if args.platform_image:paths += [m['Source'] for m in platform['Mounts']]
     for source in paths:
         if os.path.commonpath([root,source]) in (root,source):raise RuntimeError('备份目录与运行目录不能互相包含。')
     for i,source in enumerate(paths):
@@ -133,9 +140,10 @@ def stage(args):
     needed=sum(os.path.getsize(os.path.join(d,n)) for p in paths for d,_,files in os.walk(p) for n in files if not os.path.islink(os.path.join(d,n)))
     if shutil.disk_usage(root).free<needed*2+128*1024*1024:raise RuntimeError('备份目录空间不足。')
     token=uuid.uuid4().hex[:12];backup=os.path.join(root,'upgrade-'+token);os.mkdir(backup,0o700)
-    state={'id':token,'backup':backup,'phase':'PREPARED','worker':worker,'proxy':proxy,'platform':inspect(args.platform) if args.platform else None,
+    state={'id':token,'backup':backup,'phase':'PREPARED','worker':worker,'proxy':proxy,'platform':platform,
            'worker_image':inspect(args.worker_image)['Id'],'proxy_image':inspect(args.proxy_image)['Id'],
            'directories':[{'source':p,'backup':os.path.join(backup,'data-'+str(i))} for i,p in enumerate(paths)]}
+    if args.platform_image:state['platform_image']=inspect(args.platform_image)['Id']
     path=os.path.join(backup,'state.json');save(state,path);print('升级状态文件：'+path,flush=True)
     try:
         if state['platform']:docker('stop',args.platform)
@@ -156,6 +164,7 @@ def main():
     s=sub.add_parser('stage')
     for name in ('worker','proxy','worker-image','proxy-image','backup-root'):s.add_argument('--'+name,required=True)
     s.add_argument('--platform');s.add_argument('--no-platform',action='store_true');s.add_argument('--maintenance-confirmed',action='store_true')
+    s.add_argument('--platform-image',help='同时冷备平台数据，并在 accept 时保留原挂载和凭据升级平台。')
     for name in ('accept','rollback'):
         a=sub.add_parser(name);a.add_argument('--state',required=True);a.add_argument('--business-verified',action='store_true')
     args=p.parse_args()
@@ -172,7 +181,20 @@ def main():
         name=state[kind]['Name'].lstrip('/');docker('stop',name);docker('rename',name,name+'-verified-'+state['id'])
     run_container(state,'worker',False);ready(state['worker']);run_container(state,'proxy',False)
     check_policies(state,False)
-    if state.get('platform') and state['platform']['State']['Running']:docker('start',state['platform']['Name'].lstrip('/'))
+    if state.get('platform_image'):
+        name=state['platform']['Name'].lstrip('/')
+        docker('rename',name,name+'-pre-'+state['id'])
+        run_container(state,'platform',False)
+        e=env(state['platform']);host=e.get('PLATFORM_BIND_ADDRESS','127.0.0.1')
+        if host in ('0.0.0.0','::'):host='127.0.0.1'
+        for attempt in range(60):
+            try:
+                with urllib.request.urlopen('http://'+host+':'+e.get('PLATFORM_PORT','18080')+'/login.html',timeout=2) as response:
+                    if response.status==200:break
+            except Exception:pass
+            if attempt==59:raise RuntimeError('平台升级后未就绪；保持 ACCEPTING，禁止自动覆盖冷备，请核实平台日志。')
+            time.sleep(1)
+    elif state.get('platform') and state['platform']['State']['Running']:docker('start',state['platform']['Name'].lstrip('/'))
     state['phase']='ACCEPTED';save(state,path);print('已按原监听配置开放业务，旧容器及冷备保留。')
 
 if __name__=='__main__':

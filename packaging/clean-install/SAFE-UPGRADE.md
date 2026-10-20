@@ -1,4 +1,4 @@
-# 分阶段安全升级（开发验证版本，尚未合入正式离线包）
+# 分阶段安全升级
 
 适用于当前标准 worker + Proxy 独占目录、host 网络、多用户模式部署。需要 Docker、Python 3 标准库、root 权限、已导入的新镜像和足够备份空间；不需要 Compose 或 pip。worker 必须仅监听 127.0.0.1。不符合挂载布局的旧部署直接拒绝，不猜测迁移。
 
@@ -12,8 +12,9 @@
 bash safe-upgrade.sh stage \
   --worker doris-gateway-worker --proxy doris-gateway-proxy \
   --platform doris-gateway-platform \
-  --worker-image YOUR_VERIFIED_WORKER_IMAGE \
-  --proxy-image YOUR_VERIFIED_PROXY_IMAGE \
+  --worker-image doris-security-gateway-admin:sm4-row-v2-20261019 \
+  --proxy-image doris-security-gateway:sm4-row-v2-20261019 \
+  --platform-image doris-security-gateway-platform:sm4-row-v2-20261019 \
   --backup-root /data/gateway-upgrade-backups \
   --maintenance-confirmed
 ```
@@ -34,7 +35,7 @@ bash safe-upgrade.sh stage \
 bash safe-upgrade.sh accept --state /实际备份目录/state.json --business-verified
 ```
 
-工具再次检查策略，按原地址和重启策略重建配套容器，最后启动原平台容器。不会升级平台镜像。
+工具再次检查策略，按原地址和重启策略重建配套容器。指定 --platform-image 时，也冷备平台数据并在放行时保留原挂载、凭据和监听配置更新平台，检查登录页。旧平台容器保留。未指定该参数时仅启动原平台，不更新 UI；本版 SM4 升级应指定该参数。
 
 ## 3. 放行前回退
 

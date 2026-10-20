@@ -4,7 +4,7 @@ import java.util.*;
 /** Strict bounded RFC4180-style CSV. Header required; delimiter is not guessed. */
 public final class ExportCsv {
     public static List<List<String>> parse(String text){
-        if(text==null||text.length()>1024*1024)throw new IllegalArgumentException("CSV 为空或超过 1 MiB。");
+        if(text==null||text.length()>1024*1024||text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>1024*1024)throw new IllegalArgumentException("CSV 为空或超过 1 MiB。");
         if(text.startsWith("\uFEFF"))text=text.substring(1);
         List<List<String>> rows=new ArrayList<>();List<String> row=new ArrayList<>();StringBuilder value=new StringBuilder();
         boolean quoted=false,closed=false,started=false;
@@ -20,6 +20,8 @@ public final class ExportCsv {
         }
         if(quoted)throw new IllegalArgumentException("CSV 引号未闭合。");
         if(started||closed||!row.isEmpty()){row.add(value.toString());rows.add(row);}
+        if(rows.size()>1002)throw new IllegalArgumentException("CSV 行数超限。");
+        for(List<String> cells:rows)if(cells.size()>256)throw new IllegalArgumentException("CSV 列数超限。");
         return rows;
     }
     public static String write(List<List<String>> rows){
