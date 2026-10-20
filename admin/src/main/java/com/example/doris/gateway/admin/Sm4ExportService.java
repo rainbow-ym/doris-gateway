@@ -16,12 +16,15 @@ import java.util.concurrent.Semaphore;
 @Service
 public class Sm4ExportService {
     private final JdbcTemplate jdbc;private final AdminStore store;private final AccountAccessService access;private final ObjectMapper json;
-    private final Semaphore slots=new Semaphore(2);
+    @Value("${SM4_EXPORT_MAX_CONCURRENT:8}") private int maxConcurrent=8;
+    private Semaphore slots;
     @org.springframework.beans.factory.annotation.Autowired private ObjectIdentityProvider identities;
     @Value("${SM4_EXPORT_KEY_FILE:/opt/gateway-admin/data/sm4-export-keys.properties}") private String keyFile;
     @Value("${SM4_EXPORT_KEY_ID:v1}") private String currentKey;
     public Sm4ExportService(JdbcTemplate jdbc,AdminStore store,AccountAccessService access,ObjectMapper json){this.jdbc=jdbc;this.store=store;this.access=access;this.json=json;}
     @PostConstruct public void initialize(){
+        if(maxConcurrent<1||maxConcurrent>64)throw new IllegalArgumentException("SM4_EXPORT_MAX_CONCURRENT 必须为 1—64。");
+        slots=new Semaphore(maxConcurrent);
         jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_profiles(username VARCHAR(128),database_name VARCHAR(255),enabled BOOLEAN NOT NULL,allow_decrypt BOOLEAN NOT NULL,max_rows INT NOT NULL,ttl_minutes INT NOT NULL,PRIMARY KEY(username,database_name))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_receipts(id VARCHAR(36) PRIMARY KEY,username VARCHAR(128),database_name VARCHAR(255),expires_at BIGINT NOT NULL,revoked BOOLEAN NOT NULL DEFAULT FALSE,row_count INT NOT NULL,nonce VARCHAR(64) NOT NULL UNIQUE)");
     }
@@ -48,8 +51,16 @@ public class Sm4ExportService {
         if(!slots.tryAcquire())throw new IllegalStateException("加密导出繁忙，请稍后重试。");
         try{
             String user=text(request,"username"),db=text(request,"database");Map<String,Object> policy=profile(user,db);
-            if(!Boolean.TRUE.equals(policy.get("enabled")))throw new SecurityException("该账号和数据库未启用末行加密。");
+            if(!Boolean.TRUE.equals(policy.get("enabled")))throw new SecurityException("该账号和数据库未启用加密。");
             Map<String,Object> account=access.resolve(user,db);
+            List<Object[]> receipts=new ArrayList<>();
+            Map<String,Object> result=capturePrepared(request,policy,account,null,key(currentKey),receipts);
+            persistReceipts(receipts);return result;
+        }finally{slots.release();}
+    }
+    @SuppressWarnings("unchecked") private Map<String,Object> capturePrepared(Map<String,Object> request,Map<String,Object> policy,
+            Map<String,Object> account,List<Map<String,String>> boundSources,byte[] encryptionKey,List<Object[]> receipts)throws Exception {
+            String user=text(request,"username"),db=text(request,"database");
             List<String> labels=(List<String>)request.get("labels");List<List<String>> displayed=(List<List<String>>)request.get("displayed");
             List<Map<String,Object>> originals=(List<Map<String,Object>>)request.get("originals");List<Map<String,String>> sources=(List<Map<String,String>>)request.get("sources");
             if(labels==null||labels.isEmpty()||labels.size()>256||displayed==null||displayed.size()>((Number)policy.get("maxRows")).intValue()||originals==null||originals.size()!=displayed.size()||sources==null||sources.isEmpty()||sources.size()>256)
@@ -64,40 +75,54 @@ public class Sm4ExportService {
             if(json.writeValueAsBytes(request).length>1024*1024)throw new IllegalArgumentException("导出缓冲超过 1 MiB，请缩小查询范围。");
             Map<String,Object> payload=new LinkedHashMap<>();String id=UUID.randomUUID().toString();long expires=System.currentTimeMillis()+((Number)policy.get("ttlMinutes")).longValue()*60000;
             payload.put("id",id);payload.put("username",user);payload.put("database",db);payload.put("expires",expires);payload.put("epoch",account.get("epoch"));
-            payload.put("labels",labels);payload.put("originals",originals);payload.put("sources",bindSources(sources,false));payload.put("rows",displayed.size());
+            payload.put("labels",labels);payload.put("originals",originals);payload.put("sources",boundSources==null?bindSources(sources,false):boundSources);payload.put("rows",displayed.size());
             payload.put("digest",digest(labels,displayed));payload.put("carrier",request.get("carrier"));
             payload.put("types",request.get("types"));
             payload.put("format",request.get("format"));
-            String envelope=Sm4ExportCodec.encrypt(json.writeValueAsBytes(payload),currentKey,key(currentKey));
+            String envelope=Sm4ExportCodec.encrypt(json.writeValueAsBytes(payload),currentKey,encryptionKey);
             if(envelope.length()>30000)throw new IllegalArgumentException("SM4 密文超过单元格 30000 字符上限，请减少查询行数。");
             String packet=envelope.substring(envelope.lastIndexOf(':')+1);
-            jdbc.update("INSERT INTO sm4_export_receipts(id,username,database_name,expires_at,row_count,nonce) VALUES(?,?,?,?,?,?)",id,user,db,expires,displayed.size(),packet.substring(0,16));
-            store.audit("SM4_EXPORT_CAPTURED","id="+id+",user="+user+",database="+db+",rows="+displayed.size());
+            receipts.add(new Object[]{id,user,db,expires,displayed.size(),packet.substring(0,16)});
             return Collections.singletonMap("envelope",envelope);
-        }finally{slots.release();}
+    }
+    private void persistReceipts(List<Object[]> receipts){
+        if(receipts.isEmpty())return;
+        jdbc.batchUpdate("INSERT INTO sm4_export_receipts(id,username,database_name,expires_at,row_count,nonce) VALUES(?,?,?,?,?,?)",receipts);
+        List<Object[]> audit=new ArrayList<>();String now=java.time.Instant.now().toString();
+        for(Object[] row:receipts)audit.add(new Object[]{"SM4_EXPORT_CAPTURED","id="+row[0]+",user="+row[1]+",database="+row[2]+",rows="+row[4],now});
+        jdbc.batchUpdate("INSERT INTO audit_log(action,detail,created_at) VALUES(?,?,?)",audit);
     }
     /** A batch contains independently authenticated rows; one row combines all protected cells. */
     @org.springframework.transaction.annotation.Transactional(rollbackFor=Exception.class)
     @SuppressWarnings("unchecked") public Map<String,Object> captureRows(Map<String,Object> request)throws Exception {
+        if(!slots.tryAcquire())throw new IllegalStateException("加密导出繁忙，请稍后重试。");
+        try{
         if(!"ROW_V2".equals(request.get("format")))throw new IllegalArgumentException("需要逐行密文协议，请配套升级 Proxy。");
         if(json.writeValueAsBytes(request).length>1024*1024)throw new IllegalArgumentException("逐行加密请求超过 1 MiB。");
         Map<String,Object> policy=profile(text(request,"username"),text(request,"database"));
         if(!Boolean.TRUE.equals(policy.get("enabled")))throw new SecurityException("未启用逐行加密。");
-        access.resolve(text(request,"username"),text(request,"database"));
+        Map<String,Object> account=access.resolve(text(request,"username"),text(request,"database"));
         List<String> labels=(List<String>)request.get("labels");
         List<List<String>> rows=(List<List<String>>)request.get("displayed");
         List<Map<String,Object>> originals=(List<Map<String,Object>>)request.get("originals");
         if(labels==null||labels.isEmpty()||labels.size()>255||rows==null||originals==null||rows.size()!=originals.size()||rows.size()>((Number)policy.get("maxRows")).intValue())throw new IllegalArgumentException("逐行结果结构或行数无效。");
         for(String label:labels)if("__gateway_sm4".equalsIgnoreCase(label))throw new IllegalArgumentException("业务列不能使用保留列名 __gateway_sm4。");
         validateTypes(request.get("types"),labels.size(),-1);
+        List<Map<String,String>> sources=(List<Map<String,String>>)request.get("sources");
+        if(sources==null||sources.isEmpty()||sources.size()>256)throw new IllegalArgumentException("导出来源无效。");
+        // Reuse only within this request: later queries must recheck identity and authorization.
+        List<Map<String,String>> boundSources=bindSources(sources,false);
+        byte[] encryptionKey=key(currentKey);List<Object[]> receipts=new ArrayList<>();
         List<String> envelopes=new ArrayList<>();long size=0;
         for(int i=0;i<rows.size();i++){
             Map<String,Object> row=new LinkedHashMap<>(request);row.put("displayed",Collections.singletonList(rows.get(i)));row.put("originals",Collections.singletonList(originals.get(i)));row.put("carrier",0);
-            String envelope=(String)capture(row).get("envelope");size+=envelope.length();
+            String envelope=(String)capturePrepared(row,policy,account,boundSources,encryptionKey,receipts).get("envelope");size+=envelope.length();
             if(size>768*1024)throw new IllegalArgumentException("逐行密文总量超过 768 KiB，请减少查询范围。");
             envelopes.add(envelope);
         }
+        persistReceipts(receipts);
         return Collections.singletonMap("envelopes",envelopes);
+        }finally{slots.release();}
     }
     public Map<String,Object> decryptRows(String csv,String administrator)throws Exception {
         List<List<String>> input=ExportCsv.parse(csv);
@@ -158,13 +183,20 @@ public class Sm4ExportService {
     }
     private List<Map<String,String>> bindSources(List<Map<String,String>> sources,boolean verify)throws Exception {
         List<Map<String,String>> result=new ArrayList<>();
+        Map<List<String>,Map<String,String>> checked=new HashMap<>();
         for(Map<String,String> source:sources){
+            List<String> objectKey=Arrays.asList(source.get("database"),source.get("table"));
+            Map<String,String> facts=checked.get(objectKey);
+            if(facts==null){
             Map<String,Object> mapping=store.anyMapping(source.get("database"));
             if(!"ACTIVE".equals(mapping.get("status")))throw new SecurityException("来源库已解除接入或不可用。");
             long connection=((Number)mapping.get("connection_id")).longValue();String physical=String.valueOf(mapping.get("physical_database"));
             Map<String,Object> object=store.managedObject(connection,physical,source.get("table"));
             if(!"ACTIVE".equals(object.get("status")))throw new SecurityException("来源表当前不可用，拒绝解密或捕获。");
             String generation=String.valueOf(object.get("generation_id")),identity=identities.identity(connection,physical,source.get("table"));
+            facts=new HashMap<>();facts.put("generation",generation);facts.put("identity",identity);facts.put("physical",physical);checked.put(objectKey,facts);
+            }
+            String generation=facts.get("generation"),identity=facts.get("identity"),physical=facts.get("physical");
             if(verify&&(!generation.equals(source.get("generation"))||!identity.equals(source.get("physicalIdentity"))))throw new SecurityException("来源表已删除、改名或同名重建，旧文件不可解密。");
             if(verify&&source.containsKey("physicalDatabase")&&!physical.equals(source.get("physicalDatabase")))throw new SecurityException("来源库映射已变化，旧文件不可解密。");
             Map<String,String> bound=new LinkedHashMap<>(source);bound.put("generation",generation);bound.put("physicalIdentity",identity);bound.put("physicalDatabase",physical);result.add(bound);

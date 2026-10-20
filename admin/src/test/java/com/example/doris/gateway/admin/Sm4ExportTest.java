@@ -148,4 +148,77 @@ class Sm4ExportTest {
   String output=(String)service.decrypt("证件号码,备注\r\nx,y\r\nx,y\r\n"+envelope+",\r\n","admin").get("csv");
   assertEquals(3,ExportCsv.parse(output).size());
  }
+ @Test void batchChecksEachTableAndAccountOnceAndNeverCachesAcrossQueries()throws Exception{
+  Map<String,Object> policy=profile(true);policy.put("maxRows",200);service.save(policy);
+  Map<String,Object> r=request();r.put("format","ROW_V2");
+  r.put("displayed",Collections.nCopies(180,Arrays.asList("masked","remark")));
+  r.put("originals",Collections.nCopies(180,Collections.singletonMap("0","original")));
+  Map<String,String> second=new LinkedHashMap<>(((List<Map<String,String>>)r.get("sources")).get(0));second.put("column","other");
+  r.put("sources",Arrays.asList(((List<?>)r.get("sources")).get(0),second));
+  ObjectIdentityProvider identities=(ObjectIdentityProvider)ReflectionTestUtils.getField(service,"identities");
+  clearInvocations(access,identities);
+  assertEquals(180,((List<?>)service.captureRows(r).get("envelopes")).size());
+  verify(access,times(1)).resolve("user","db");verify(identities,times(1)).identity(1,"PUBLIC","src");
+  assertEquals(180,jdbc.queryForObject("SELECT COUNT(*) FROM sm4_export_receipts",Integer.class));
+  service.captureRows(r);verify(identities,times(2)).identity(1,"PUBLIC","src");
+  r.put("displayed",Collections.nCopies(201,Arrays.asList("masked","remark")));
+  r.put("originals",Collections.nCopies(201,Collections.singletonMap("0","original")));
+  assertThrows(IllegalArgumentException.class,()->service.captureRows(r));
+  assertEquals(360,jdbc.queryForObject("SELECT COUNT(*) FROM sm4_export_receipts",Integer.class));
+ }
+ @Test void fiveDifferentUsersCanCapture180RowsSimultaneouslyWithoutMixingIdentities()throws Exception{
+  java.util.concurrent.CountDownLatch arrived=new java.util.concurrent.CountDownLatch(5);
+  ObjectIdentityProvider identities=(ObjectIdentityProvider)ReflectionTestUtils.getField(service,"identities");
+  when(identities.identity(1,"PUBLIC","src")).thenAnswer(call->{arrived.countDown();assertTrue(arrived.await(10,java.util.concurrent.TimeUnit.SECONDS),"five requests must enter together");return "0:1:2";});
+  java.util.concurrent.ExecutorService executor=java.util.concurrent.Executors.newFixedThreadPool(5);
+  List<java.util.concurrent.Future<?>> results=new ArrayList<>();long start=System.nanoTime();
+  try{
+   for(int u=0;u<5;u++){
+    final String username="user"+u;Map<String,Object> identity=new LinkedHashMap<>(account);identity.put("epoch",100L+u);
+    when(access.resolve(username,"db")).thenReturn(identity);
+    Map<String,Object> policy=profile(true);policy.put("username",username);policy.put("maxRows",200);service.save(policy);
+    results.add(executor.submit(()->{
+     try{
+      Map<String,Object> r=request();r.put("username",username);r.put("format","ROW_V2");
+      r.put("displayed",Collections.nCopies(180,Arrays.asList("masked","remark")));
+      r.put("originals",Collections.nCopies(180,Collections.singletonMap("0",username+"-secret")));
+      org.springframework.transaction.support.TransactionTemplate tx=new org.springframework.transaction.support.TransactionTemplate(
+              new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
+      List<?> envelopes=(List<?>)tx.execute(status->{
+       try{return service.captureRows(r);}catch(Exception e){throw new RuntimeException(e);}
+      }).get("envelopes");assertEquals(180,envelopes.size());
+      for(Object envelope:envelopes){
+       Map<?,?> payload=new ObjectMapper().readValue(Sm4ExportCodec.decrypt((String)envelope,key),Map.class);
+       assertEquals(username,payload.get("username"));assertEquals(identity.get("epoch").toString(),payload.get("epoch").toString());
+       assertEquals(Collections.singletonList(Collections.singletonMap("0",username+"-secret")),payload.get("originals"));
+      }
+     }catch(Exception e){throw new RuntimeException(e);}
+    }));
+   }
+   for(java.util.concurrent.Future<?> result:results)result.get(30,java.util.concurrent.TimeUnit.SECONDS);
+   assertEquals(900,jdbc.queryForObject("SELECT COUNT(*) FROM sm4_export_receipts",Integer.class));
+   verify(identities,times(5)).identity(1,"PUBLIC","src");
+   System.out.println("SM4 five-user service test: 900 encrypted/decrypted rows, elapsed ms="+(System.nanoTime()-start)/1000000);
+  }finally{executor.shutdownNow();}
+ }
+ @Test void failedBatchWritesNoPartialReceiptsAndReleasesSlot()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();r.put("format","ROW_V2");
+  r.put("displayed",Arrays.asList(Arrays.asList("x","y"),Arrays.asList("a","b")));
+  r.put("originals",Arrays.asList(Collections.singletonMap("0","ok"),Collections.singletonMap("0",String.join("",Collections.nCopies(30000,"x")))));
+  assertThrows(IllegalArgumentException.class,()->service.captureRows(r));assertTrue(service.receipts().isEmpty());
+  r.put("originals",Arrays.asList(Collections.singletonMap("0","ok"),Collections.singletonMap("0","ok2")));
+  assertEquals(2,((List<?>)service.captureRows(r).get("envelopes")).size());
+ }
+ @Test void auditFailureRollsBackBatchedReceipts()throws Exception{
+  service.save(profile(true));Map<String,Object> r=request();r.put("format","ROW_V2");
+  jdbc.execute("ALTER TABLE audit_log ADD CONSTRAINT reject_capture CHECK(action<>'SM4_EXPORT_CAPTURED')");
+  org.springframework.transaction.support.TransactionTemplate tx=new org.springframework.transaction.support.TransactionTemplate(
+          new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
+  assertThrows(RuntimeException.class,()->tx.execute(status->{
+   try{return service.captureRows(r);}catch(Exception e){throw new RuntimeException(e);}
+  }));
+  assertTrue(service.receipts().isEmpty());
+  jdbc.execute("ALTER TABLE audit_log DROP CONSTRAINT reject_capture");
+  assertEquals(1,((List<?>)service.captureRows(r).get("envelopes")).size());
+ }
 }

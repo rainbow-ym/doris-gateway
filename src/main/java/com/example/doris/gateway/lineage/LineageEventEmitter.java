@@ -19,6 +19,7 @@ public final class LineageEventEmitter {
     private static final String CONTROL_ENDPOINT = environment("GATEWAY_CONTROL_ENDPOINT", controlEndpoint(ENDPOINT));
     private static final String TOKEN = environment("GATEWAY_LINEAGE_TOKEN");
     private static final int TIMEOUT_MILLIS = integerEnvironment("GATEWAY_LINEAGE_TIMEOUT_MS", 5000);
+    private static final int EXPORT_TIMEOUT_MILLIS = integerEnvironment("SM4_EXPORT_TIMEOUT_MS", 60000);
     private static final boolean FAIL_CLOSED = Boolean.parseBoolean(environment("GATEWAY_LINEAGE_FAIL_CLOSED", "true"));
     private static final AuditOutbox AUDIT_OUTBOX = new AuditOutbox(java.nio.file.Paths.get(environment("GATEWAY_AUDIT_OUTBOX_DIR","/opt/gateway/logs/audit-outbox")),
             payload -> post(CONTROL_ENDPOINT+"/audit",payload,true));
@@ -124,7 +125,7 @@ public final class LineageEventEmitter {
             connection = (HttpURLConnection) new URL(endpoint).openConnection();
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(TIMEOUT_MILLIS);
-            connection.setReadTimeout(endpoint.endsWith("/account-command") ? 30000 : TIMEOUT_MILLIS);
+            connection.setReadTimeout(endpoint.endsWith("/export-capture") ? EXPORT_TIMEOUT_MILLIS : endpoint.endsWith("/account-command") ? 30000 : TIMEOUT_MILLIS);
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             connection.setRequestProperty("X-Gateway-Lineage-Token", TOKEN);
@@ -143,7 +144,10 @@ public final class LineageEventEmitter {
             return response;
         } catch (final Exception ex) {
             if (ex instanceof IllegalStateException) throw (IllegalStateException) ex;
-            if(strict)throw new IllegalStateException("控制接口无法确认。",ex);
+            if(strict){
+                if(endpoint.endsWith("/export-capture")&&ex instanceof java.net.SocketTimeoutException)throw new IllegalStateException("控制接口超时（加密响应等待上限 "+EXPORT_TIMEOUT_MILLIS+" ms）；请检查 Worker 耗时及网络。",ex);
+                throw new IllegalStateException("控制接口通信失败（"+ex.getClass().getSimpleName()+"）；请检查 Worker 状态及连接。",ex);
+            }
             fail("Unable to reach gateway management control plane.", ex);
             return "";
         } finally {

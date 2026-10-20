@@ -83,6 +83,14 @@ def run_container(state,kind,staged):
     restart=old['HostConfig'].get('RestartPolicy',{}).get('Name','no')
     if restart not in ('no','always','unless-stopped'):raise RuntimeError('该重启策略尚未验证。')
     args+=['--restart','no' if staged else restart]
+    # Preserve the resource budget when replacing the runtime, including performance upgrades.
+    for key,flag in (('Memory','--memory'),('MemorySwap','--memory-swap'),('MemoryReservation','--memory-reservation'),
+                     ('CpuShares','--cpu-shares'),('CpuPeriod','--cpu-period'),('CpuQuota','--cpu-quota'),
+                     ('CpusetCpus','--cpuset-cpus'),('CpusetMems','--cpuset-mems'),('PidsLimit','--pids-limit')):
+        if old['HostConfig'].get(key):args += [flag,str(old['HostConfig'][key])]
+    if old['HostConfig'].get('NanoCpus'):args += ['--cpus',str(old['HostConfig']['NanoCpus']/1000000000)]
+    for limit in old['HostConfig'].get('Ulimits') or []:
+        args += ['--ulimit',limit['Name']+'='+str(limit['Soft'])+':'+str(limit['Hard'])]
     hostname=socket.gethostname()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}',hostname):raise RuntimeError('hostname 格式异常，停止升级。')
     hosts=old['HostConfig'].get('ExtraHosts') or []

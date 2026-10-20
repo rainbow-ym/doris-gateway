@@ -10,7 +10,12 @@ import java.util.concurrent.Semaphore;
 
 /** Bounded opt-in materialization before the first result packet. Never alters business column types. */
 public final class Sm4ExportRows {
-    private static final Semaphore SLOTS=new Semaphore(2);
+    private static final Semaphore SLOTS=new Semaphore(concurrency());
+    private static int concurrency(){
+        String value=System.getenv("SM4_EXPORT_MAX_CONCURRENT");int limit=value==null?8:Integer.parseInt(value);
+        if(limit<1||limit>64)throw new IllegalArgumentException("SM4_EXPORT_MAX_CONCURRENT 必须为 1—64。");
+        return limit;
+    }
     private static final ObjectMapper JSON=new ObjectMapper();
     private final List<Object[]> rows;
     private int index=-1;
