@@ -89,9 +89,10 @@ public final class MaskMergedResult extends DecoratorMergedResult {
         return null == originalValue ? null : maskAlgorithm.get().mask(originalValue);
     }
     public boolean isExportProtected(int columnIndex){Optional<MaskAlgorithm> algorithm=columnAlgorithms.get(columnIndex);return algorithm!=null&&algorithm.isPresent();}
-    public Object exportOriginalValue(int columnIndex)throws SQLException {
+    public Object exportOriginalValue(int columnIndex)throws SQLException {return exportOriginalValue(columnIndex,Object.class);}
+    public Object exportOriginalValue(int columnIndex,Class<?> type)throws SQLException {
         if(!isExportProtected(columnIndex))throw new SQLException("禁止提取非保护列的原值。");
-        return getMergedResult().getValue(columnIndex,Object.class);
+        return getMergedResult().getValue(columnIndex,type);
     }
     public List<java.util.Map<String,String>> exportSources(){
         List<java.util.Map<String,String>> result=new ArrayList<>();

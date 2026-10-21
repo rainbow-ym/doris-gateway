@@ -11,6 +11,7 @@ import java.security.MessageDigest;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.Semaphore;
+import com.example.doris.gateway.export.ExportValue;
 import com.example.doris.gateway.observability.Telemetry;
 import com.example.doris.gateway.observability.Observation;
 import static com.example.doris.gateway.observability.Observation.*;
@@ -72,14 +73,17 @@ public class Sm4ExportService {
         try(Observation.Scope ignored=Telemetry.current().stage(Stage.POLICY)){
             Telemetry.current().add(Measure.SYSTEM_DB_CALLS,1);
             List<Map<String,Object>> rows=jdbc.queryForList("SELECT "+PROFILE_FIELDS+" FROM sm4_export_profiles WHERE username=? AND database_name=?",user,db);
-            if(!rows.isEmpty())return rows.get(0);
+            if(!rows.isEmpty())return protocol(rows.get(0));
             Map<String,Object> defaults=defaults();
             if(Boolean.TRUE.equals(defaults.get("linked"))){
                 Telemetry.current().add(Measure.SYSTEM_DB_CALLS,1);
-                if(jdbc.queryForObject("SELECT COUNT(*) FROM account_database_bindings b JOIN connections c ON c.id=b.connection_id JOIN logical_databases d ON d.logical_name=b.logical_name WHERE c.username=? AND b.logical_name=? AND b.status='ACTIVE' AND d.status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM account_lifecycle_states l WHERE l.username=c.username AND l.status<>'ACTIVE')",Integer.class,user,db)>0)return defaults;
+                if(jdbc.queryForObject("SELECT COUNT(*) FROM account_database_bindings b JOIN connections c ON c.id=b.connection_id JOIN logical_databases d ON d.logical_name=b.logical_name WHERE c.username=? AND b.logical_name=? AND b.status='ACTIVE' AND d.status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM account_lifecycle_states l WHERE l.username=c.username AND l.status<>'ACTIVE')",Integer.class,user,db)>0)return protocol(defaults);
             }
-            return Collections.singletonMap("enabled",false);
+            return protocol(Collections.singletonMap("enabled",false));
         }
+    }
+    private Map<String,Object> protocol(Map<String,Object> policy){
+        Map<String,Object> result=new LinkedHashMap<>(policy);result.put("captureProtocol","ROW_TYPED_V1");return result;
     }
     private int ttl(Map<String,Object> r,Map<String,Object> previous){
         if(r.containsKey("ttlDays")){
@@ -182,10 +186,11 @@ public class Sm4ExportService {
     @SuppressWarnings("unchecked") public Map<String,Object> captureRows(Map<String,Object> request)throws Exception {
         if(!slots.tryAcquire()){Telemetry.current().reason(Reason.CAPACITY);throw new IllegalStateException("加密导出繁忙，请稍后重试。");}
         try{
-        if(!"ROW_V2".equals(request.get("format")))throw new IllegalArgumentException("需要逐行密文协议，请配套升级 Proxy。");
+        if(!"ROW_V2".equals(request.get("format"))&&!"ROW_TYPED_V1".equals(request.get("format")))throw new IllegalArgumentException("需要逐行密文协议，请配套升级 Proxy。");
         if(json.writeValueAsBytes(request).length>1024*1024)throw new IllegalArgumentException("逐行加密请求超过 1 MiB。");
         Map<String,Object> policy=profile(text(request,"username"),text(request,"database"));
         if(!Boolean.TRUE.equals(policy.get("enabled")))throw new SecurityException("未启用逐行加密。");
+        if("ROW_TYPED_V1".equals(request.get("format")))return captureTyped(request,policy);
         Map<String,Object> account;try(Observation.Scope ignored=Telemetry.current().stage(Stage.ACCOUNT_CHECK)){account=access.resolve(text(request,"username"),text(request,"database"));}
         List<String> labels=(List<String>)request.get("labels");
         List<List<String>> rows=(List<List<String>>)request.get("displayed");
@@ -212,6 +217,49 @@ public class Sm4ExportService {
         return Collections.singletonMap("envelopes",envelopes);
         }finally{slots.release();}
     }
+    @SuppressWarnings("unchecked")
+    private Map<String,Object> captureTyped(Map<String,Object> request,Map<String,Object> policy)throws Exception{
+        boolean editable=Boolean.TRUE.equals(policy.get("allowEdit"));
+        if(!Objects.equals(request.get("allowEdit"),editable))throw new IllegalStateException("加密配置在查询期间发生变化，请重新查询。");
+        List<String> labels=(List<String>)request.get("labels");List<?> types=(List<?>)request.get("types"),typeNames=(List<?>)request.get("typeNames");
+        List<String> digests=(List<String>)request.get("digests");List<Map<String,Object>> originals=(List<Map<String,Object>>)request.get("originals");
+        List<Map<String,String>> sources=(List<Map<String,String>>)request.get("sources");
+        if(labels==null||labels.isEmpty()||labels.size()>255||types==null||typeNames==null||types.size()!=labels.size()||typeNames.size()!=labels.size()||originals==null||digests==null||digests.size()!=originals.size()||originals.size()>((Number)policy.get("maxRows")).intValue())throw new IllegalArgumentException("类型化加密结构或行列数量无效。");
+        uniqueLabels(labels);
+        for(int i=0;i<labels.size();i++){
+            if("__gateway_sm4".equalsIgnoreCase(labels.get(i))||!(types.get(i) instanceof Integer)||!(typeNames.get(i) instanceof String))throw new IllegalArgumentException("结果列定义无效，第 "+(i+1)+" 列。");
+        }
+        if(sources==null||sources.isEmpty()||sources.size()>256)throw new IllegalArgumentException("保护字段来源无效。");
+        if(originals.isEmpty())return Collections.singletonMap("envelopes",Collections.emptyList());
+        List<Integer> indexes=new ArrayList<>();
+        for(String value:originals.get(0).keySet()){
+            int index=Integer.parseInt(value);if(index<0||index>=labels.size()||!value.equals(String.valueOf(index)))throw new IllegalArgumentException("保护字段位置无效。");indexes.add(index);
+        }
+        Collections.sort(indexes);if(indexes.isEmpty())throw new IllegalArgumentException("缺少受保护字段。");
+        List<String> protectedLabels=new ArrayList<>();for(int index:indexes)protectedLabels.add(labels.get(index));
+        String user=text(request,"username"),db=text(request,"database");Map<String,Object> account;
+        try(Observation.Scope ignored=Telemetry.current().stage(Stage.ACCOUNT_CHECK)){account=access.resolve(user,db);}
+        byte[] encryptionKey=key(currentKey);String id=UUID.randomUUID().toString();long expires=System.currentTimeMillis()+((Number)policy.get("ttlMinutes")).longValue()*60000;
+        Map<String,Object> metadata=new LinkedHashMap<>();metadata.put("v",5);metadata.put("id",id);metadata.put("username",user);metadata.put("database",db);
+        metadata.put("epoch",account.get("epoch"));metadata.put("expires",expires);metadata.put("sources",bindSources(sources,false));
+        metadata.put("editable",editable);metadata.put("protectedLabels",protectedLabels);metadata.put("checkedLabels",editable?protectedLabels:labels);
+        metadata.put("labels",labels);metadata.put("types",types);metadata.put("typeNames",typeNames);
+        String common=encryptObserved(metadata,encryptionKey);if(common.length()>30000)throw new IllegalArgumentException("类型化批次元数据过大。");
+        List<String> envelopes=new ArrayList<>();long bytes=0;
+        for(int i=0;i<originals.size();i++){
+            Map<String,Object> original=originals.get(i);if(!original.keySet().equals(originals.get(0).keySet()))throw new IllegalArgumentException("各行受保护字段不一致。");
+            String digest=digests.get(i);
+            if(digest==null||digest.length()!=44||Base64.getDecoder().decode(digest).length!=32)throw new IllegalArgumentException("显示内容摘要无效。");
+            List<Object> cells=new ArrayList<>();for(int index:indexes){Object cell=original.get(String.valueOf(index));String decoded=ExportValue.decode(cell);cells.add(cell);Telemetry.current().add(Measure.RAW_BYTES,decoded.getBytes(StandardCharsets.UTF_8).length);Telemetry.current().add(Measure.PROTECTED_CELLS,1);}
+            Map<String,Object> packet=new LinkedHashMap<>();packet.put("v",5);packet.put("b",id);packet.put("r",i);packet.put("o",cells);packet.put("d",digest);
+            String token=encryptObserved(packet,encryptionKey);bytes+=token.length();
+            if(token.length()>30000||bytes>768*1024)throw new IllegalArgumentException("类型化密文大小超限，请缩小查询范围。");envelopes.add(token);
+        }
+        Telemetry.current().add(Measure.ROWS,originals.size());Telemetry.current().add(Measure.CIPHERTEXT_BYTES,bytes);
+        persistReceipts(Collections.singletonList(new Object[]{id,user,db,expires,originals.size(),id}));
+        try(Observation.Scope ignored=Telemetry.current().stage(Stage.RECEIPT_WRITE)){Telemetry.current().add(Measure.SYSTEM_DB_CALLS,1);jdbc.update("INSERT INTO sm4_export_batches(id,metadata) VALUES(?,?)",id,common);}
+        return Collections.singletonMap("envelopes",envelopes);
+    }
     public Map<String,Object> decryptRows(String csv,String administrator)throws Exception {
         List<List<String>> input;try(Observation.Scope ignored=Telemetry.current().stage(Stage.CSV_PARSE)){input=ExportCsv.parse(csv);}
         if(csv!=null)Telemetry.current().add(Measure.HTTP_BYTES,csv.getBytes(StandardCharsets.UTF_8).length);
@@ -227,7 +275,7 @@ public class Sm4ExportService {
             Map<?,?> packet;
             try{packet=json.readValue(decryptObserved(envelope,key(Sm4ExportCodec.keyId(envelope))),Map.class);}
             catch(Exception e){store.audit("SM4_EXPORT_DECRYPT_DENIED","id=unverified,administrator="+administrator);throw e;}
-            if(Integer.valueOf(3).equals(packet.get("v"))||Integer.valueOf(4).equals(packet.get("v")))return decryptEditable(fullHeader,input,administrator,((Number)packet.get("v")).intValue());
+            if(Integer.valueOf(3).equals(packet.get("v"))||Integer.valueOf(4).equals(packet.get("v"))||Integer.valueOf(5).equals(packet.get("v")))return decryptEditable(fullHeader,input,administrator,((Number)packet.get("v")).intValue());
         }
         List<String> labels=new ArrayList<>(fullHeader.subList(0,fullHeader.size()-1));
         List<List<String>> output=new ArrayList<>();output.add(labels);
@@ -350,8 +398,9 @@ public class Sm4ExportService {
                     Map<String,Object> account;try(Observation.Scope ignored=Telemetry.current().stage(Stage.ACCOUNT_CHECK)){account=access.resolve(user,db);}
                     if(!Objects.equals(String.valueOf(account.get("epoch")),String.valueOf(metadata.get("epoch")))){Telemetry.current().reason(Reason.ACCOUNT_CHANGED);throw new SecurityException("原账号凭据版本已变化。");}
                     checkPermissions(account,bindSources((List<Map<String,String>>)metadata.get("sources"),true));
-                    if(format==4&&!Integer.valueOf(4).equals(metadata.get("v")))throw new IllegalArgumentException("密文版本与批次不一致。");
+                    if(format>=4&&!Integer.valueOf(format).equals(metadata.get("v")))throw new IllegalArgumentException("密文版本与批次不一致。");
                     checkedLabels=(List<String>)metadata.get("checkedLabels");
+                    if(format==5&&!Boolean.TRUE.equals(metadata.get("editable"))&&!labels.equals(checkedLabels))throw new IllegalArgumentException("严格模式不允许修改业务列结构。");
                     total=((Number)records.get(0).get("row_count")).intValue();
                 }
                 if(!batch.equals(id))throw new IllegalArgumentException("不能混合不同查询批次的密文。");
@@ -360,12 +409,13 @@ public class Sm4ExportService {
                     throw new IllegalArgumentException("密文行重复或行标识无效。");
                 List<String> checked=selectColumns(labels,row,checkedLabels);
                 if(!digest(checkedLabels,Collections.singletonList(checked)).equals(packet.get("d")))
-                    {Telemetry.current().reason(Reason.TAMPERED);throw new IllegalArgumentException(format==4?"受保护内容被修改，或与该行密文不匹配；拒绝还原。":"受保护内容或记录标识被修改，或密文被放到其他记录；拒绝还原。");}
+                    {Telemetry.current().reason(Reason.TAMPERED);throw new IllegalArgumentException(format>=4?"受保护内容被修改，或与该行密文不匹配；拒绝还原。":"受保护内容或记录标识被修改，或密文被放到其他记录；拒绝还原。");}
                 List<Object> raw=(List<Object>)packet.get("o");
                 int offset=format==3?1:0;
-                if(raw.size()!=checkedLabels.size()-offset)throw new IllegalArgumentException("密文保护字段结构无效。");
+                List<String> restoreLabels=format==5?(List<String>)metadata.get("protectedLabels"):checkedLabels.subList(offset,checkedLabels.size());
+                if(raw.size()!=restoreLabels.size())throw new IllegalArgumentException("密文保护字段结构无效。");
                 List<String> restored=new ArrayList<>(row.subList(0,labels.size()));
-                for(int i=0;i<raw.size();i++)restored.set(labels.indexOf(checkedLabels.get(i+offset)),raw.get(i)==null?"":String.valueOf(raw.get(i)));
+                for(int i=0;i<raw.size();i++)restored.set(labels.indexOf(restoreLabels.get(i)),format==5?ExportValue.decode(raw.get(i)):raw.get(i)==null?"":String.valueOf(raw.get(i)));
                 output.add(restored);
             }
             // Recheck revocation and expiry before releasing any plaintext.
