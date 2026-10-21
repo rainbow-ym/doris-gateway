@@ -29,7 +29,7 @@ public class SecurityConfig extends WebSecurityConfigurerAdapter {
     @Override
     protected void configure(final HttpSecurity http) throws Exception {
         http.authorizeRequests().antMatchers("/api/health", "/api/internal/lineage/events", "/api/internal/sql/**").permitAll()
-                .antMatchers("/api/versions/*/recovery").hasRole("ADMIN").anyRequest().authenticated()
+                .antMatchers("/api/versions/*/recovery", "/api/observability/**").hasRole("ADMIN").anyRequest().authenticated()
                 .and().httpBasic()
                 .and().csrf().disable()
                 .headers().frameOptions().deny().contentTypeOptions();

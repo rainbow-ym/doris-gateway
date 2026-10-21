@@ -17,6 +17,8 @@ public final class Recorder {
     private final EnumMap<Operation, long[]> histograms = new EnumMap<>(Operation.class);
     private final EnumMap<Reason, Long> results = new EnumMap<>(Reason.class);
     private long active, dropped, evicted;
+    private volatile java.util.function.Consumer<Record> listener = record -> { };
+    public void onComplete(java.util.function.Consumer<Record> listener) { this.listener = Objects.requireNonNull(listener); }
 
     public Recorder(int capacity, int maxActive, long retentionMillis) {
         this(capacity, maxActive, retentionMillis, System::nanoTime);
@@ -75,11 +77,13 @@ public final class Recorder {
     public static final class Record {
         public final String requestId, spanId, parentSpanId;
         public final Operation operation; public final Reason reason; public final long durationNanos;
+        public final long startedAtMillis;
         public final Map<Stage, Timing> stages; public final Map<Measure, Long> measures;
         public final int unfinishedScopes;
         Record(Request r, Reason reason, long duration) {
             requestId = r.request; spanId = r.span; parentSpanId = r.parent; operation = r.operation;
             this.reason = reason; durationNanos = duration; unfinishedScopes = r.open;
+            startedAtMillis = r.startedAtMillis;
             stages = Collections.unmodifiableMap(new EnumMap<>(r.stages));
             measures = Collections.unmodifiableMap(new EnumMap<>(r.measures));
         }
@@ -87,6 +91,7 @@ public final class Recorder {
     private final class Request implements Observation {
         final String request, span = id(), parent; final Operation operation;
         final long started = clock.getAsLong();
+        final long startedAtMillis = System.currentTimeMillis();
         final EnumMap<Stage, Timing> stages = new EnumMap<>(Stage.class);
         final EnumMap<Measure, Long> measures = new EnumMap<>(Measure.class);
         int open; boolean finished;
@@ -116,7 +121,9 @@ public final class Recorder {
         }
         public synchronized void finish(Reason reason) {
             if (finished) return; finished = true;
-            long now = clock.getAsLong(); complete(new Record(this, reason == null ? Reason.UNKNOWN : reason, Math.max(0, now - started)), now);
+            long now = clock.getAsLong(); Record record = new Record(this, reason == null ? Reason.UNKNOWN : reason, Math.max(0, now - started));
+            complete(record, now);
+            try { listener.accept(record); } catch (RuntimeException ignored) { /* Monitoring never replaces business outcome. */ }
         }
     }
     private static long saturatedAdd(long a, long b) { return a > Long.MAX_VALUE - b ? Long.MAX_VALUE : a + b; }

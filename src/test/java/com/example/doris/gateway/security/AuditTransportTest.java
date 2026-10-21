@@ -12,6 +12,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class AuditTransportTest {
     @Test void httpFailureCannotSilentlyBecomeSuccessEvenWithLegacyFailOpenSetting() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeFalse(
+                System.getProperty("os.name").startsWith("Windows"),
+                "Durable audit directory fsync requires the Linux deployment filesystem");
         AtomicInteger requests=new AtomicInteger();
         HttpServer server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
         server.createContext("/audit",exchange->{
@@ -23,7 +26,10 @@ class AuditTransportTest {
         });server.start();
         Process process=null;
         try {
-            ProcessBuilder builder=new ProcessBuilder(System.getProperty("java.home")+"/bin/java","-cp",System.getProperty("java.class.path"),AuditTransportTest.class.getName());
+            // The child needs only application/test classes, not the entire Surefire boot classpath.
+            String cp=new java.io.File(AuditTransportTest.class.getProtectionDomain().getCodeSource().getLocation().toURI()).getPath()
+                    +java.io.File.pathSeparator+new java.io.File(LineageEventEmitter.class.getProtectionDomain().getCodeSource().getLocation().toURI()).getPath();
+            ProcessBuilder builder=new ProcessBuilder(System.getProperty("java.home")+"/bin/java","-cp",cp,AuditTransportTest.class.getName());
             builder.environment().put("GATEWAY_CONTROL_ENDPOINT","http://127.0.0.1:"+server.getAddress().getPort());
             builder.environment().put("GATEWAY_LINEAGE_TOKEN","synthetic-test-token-not-a-secret");
             builder.environment().put("GATEWAY_LINEAGE_FAIL_CLOSED","false");

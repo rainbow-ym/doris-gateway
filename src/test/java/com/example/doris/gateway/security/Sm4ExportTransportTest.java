@@ -12,9 +12,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class Sm4ExportTransportTest {
     @Test void exportUsesIndependentTimeoutAndReportsTimeoutExplicitly() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger correlated=new java.util.concurrent.atomic.AtomicInteger();
         HttpServer server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
         server.createContext("/export-capture",exchange->{
             try {
+                if("00000000-0000-0000-0000-000000000001".equals(exchange.getRequestHeaders().getFirst("X-Gateway-Observation-Request-Id"))
+                        && "00000000-0000-0000-0000-000000000002".equals(exchange.getRequestHeaders().getFirst("X-Gateway-Observation-Parent-Span-Id")))correlated.incrementAndGet();
                 while(exchange.getRequestBody().read()!=-1) { }
                 Thread.sleep(300);
                 byte[] body="{\"envelopes\":[]}".getBytes(StandardCharsets.UTF_8);
@@ -27,6 +30,7 @@ class Sm4ExportTransportTest {
         try {
             runChild(server.getAddress().getPort(),"1500","success");
             runChild(server.getAddress().getPort(),"100","timeout");
+            assertEquals(2,correlated.get(),"Both requests must propagate internal correlation headers");
         } finally { server.stop(0); }
     }
     private void runChild(int port,String timeout,String expectation) throws Exception {
@@ -46,7 +50,7 @@ class Sm4ExportTransportTest {
     }
     public static void main(String[] args) {
         try {
-            LineageEventEmitter.captureExport("{}");
+            LineageEventEmitter.captureExport("{}","00000000-0000-0000-0000-000000000001","00000000-0000-0000-0000-000000000002");
             if(!"success".equals(args[0]))throw new AssertionError("timeout was ignored");
         } catch(IllegalStateException e) {
             if(!"timeout".equals(args[0])||!e.getMessage().contains("100 ms")

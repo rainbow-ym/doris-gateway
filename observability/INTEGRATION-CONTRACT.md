@@ -1,4 +1,6 @@
-# 接入约定 v1（待第二阶段实施）
+# 接入约定 v1
+
+第二阶段落实情况及测量边界见 [PHASE2.md](PHASE2.md)。Worker 同步服务调用使用有作用域的 ThreadLocal，并在 finally 恢复；Proxy 与跨进程边界显式传递上下文。不将 ThreadLocal 隐式传播到线程池。
 
 ## 稳定边界
 
@@ -6,7 +8,7 @@
 
 内部关联头拟定为 X-Gateway-Observation-Request-Id 和 X-Gateway-Observation-Parent-Span-Id，值为 UUID；只从已认证内部请求接受，不能信任外部业务客户端值。集群归属由认证通道注入，不由请求体指定。不要将这些信息写入业务 SQL。
 
-跨线程显式传递 Observation；不自动使用 ThreadLocal。Proxy span 与 Worker span 通过 parentSpanId 关联。阶段汇总是包含时间，不是互斥时间；并行/嵌套阶段不能相加。所有本进程耗时使用单调时钟，跨主机时间戳只用于展示。
+跨线程显式传递 Observation。Proxy span 与 Worker span 通过 parentSpanId 关联。阶段汇总是包含时间，不是互斥时间；并行/嵌套阶段不能相加。所有本进程耗时使用单调时钟，跨主机时间戳只用于展示。
 
 结果类目从 Reason 映射，权限不足不是程序异常。未知错误使用 UNKNOWN；不要将 exception.getMessage() 作为标签或详情。业务原异常不变。事务提交后才记录成功；网络发送完成与客户端消费完成是不同边界。
 

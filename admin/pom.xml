@@ -18,6 +18,7 @@
         <mysql.version>8.4.0</mysql.version>
     </properties>
     <dependencies>
+        <dependency><groupId>io.micrometer</groupId><artifactId>micrometer-registry-prometheus</artifactId></dependency>
         <dependency><groupId>org.bouncycastle</groupId><artifactId>bcprov-jdk18on</artifactId><version>1.84</version></dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -53,6 +54,7 @@
     </dependencies>
     <build>
         <plugins>
+            <plugin><groupId>org.codehaus.mojo</groupId><artifactId>build-helper-maven-plugin</artifactId><version>3.6.0</version><executions><execution><id>observation-core</id><phase>generate-sources</phase><goals><goal>add-source</goal></goals><configuration><sources><source>${project.basedir}/../observability/src/main/java</source></sources></configuration></execution></executions></plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

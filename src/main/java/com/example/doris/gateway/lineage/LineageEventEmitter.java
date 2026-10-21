@@ -37,12 +37,15 @@ public final class LineageEventEmitter {
         return post(CONTROL_ENDPOINT + "/" + operation, '{' + field("username", username) + ',' + field("database", database) + '}');
     }
     public static String captureExport(final String payload) {
+        return captureExport(payload,null,null);
+    }
+    public static String captureExport(final String payload,final String requestId,final String parentSpanId) {
         if(CONTROL_ENDPOINT.isEmpty())throw new IllegalStateException("缺少加密导出控制接口。");
         java.net.URI uri=java.net.URI.create(CONTROL_ENDPOINT);
         if(!"https".equalsIgnoreCase(uri.getScheme())&&!("http".equalsIgnoreCase(uri.getScheme())&&java.util.Arrays.asList("127.0.0.1","localhost","[::1]","::1").contains(uri.getHost())))
             throw new IllegalStateException("原值加密传输仅允许本机回环 HTTP 或 HTTPS 控制接口。");
         requireToken();
-        return post(CONTROL_ENDPOINT+"/export-capture",payload,true);
+        return post(CONTROL_ENDPOINT+"/export-capture",payload,true,requestId,parentSpanId);
     }
 
     public static void auditExecution(final String username, final String database, final String sql, final String outcome, final String requestId) {
@@ -120,6 +123,9 @@ public final class LineageEventEmitter {
     }
 
     private static String post(final String endpoint, final String payload, final boolean strict) {
+        return post(endpoint,payload,strict,null,null);
+    }
+    private static String post(final String endpoint, final String payload, final boolean strict, final String requestId, final String parentSpanId) {
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection) new URL(endpoint).openConnection();
@@ -129,6 +135,8 @@ public final class LineageEventEmitter {
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             connection.setRequestProperty("X-Gateway-Lineage-Token", TOKEN);
+            if(requestId!=null&&!requestId.isEmpty())connection.setRequestProperty("X-Gateway-Observation-Request-Id",requestId);
+            if(parentSpanId!=null&&!parentSpanId.isEmpty())connection.setRequestProperty("X-Gateway-Observation-Parent-Span-Id",parentSpanId);
             byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
             connection.setFixedLengthStreamingMode(bytes.length);
             try (OutputStream output = connection.getOutputStream()) {
