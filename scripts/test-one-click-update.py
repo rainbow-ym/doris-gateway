@@ -7,10 +7,15 @@ spec=importlib.util.spec_from_file_location('oneclick',path)
 oneclick=importlib.util.module_from_spec(spec);spec.loader.exec_module(oneclick)
 
 class OneClickTest(unittest.TestCase):
-    def scenario(self,failure=None):
+    def scenario(self,failure=None,offline=False,mismatch=False):
         with tempfile.TemporaryDirectory() as temp:
             base=pathlib.Path(temp);install=base/'install';install.mkdir()
             args=argparse.Namespace(install_dir=str(install),backup_dir=str(base/'backups'),prefix='doris-gateway')
+            if offline:
+                manifest={'archive':'gateway-images.tar.gz'}
+                for kind,repo in [('worker','doris-security-gateway-admin'),('proxy','doris-security-gateway'),('platform','doris-security-gateway-platform')]:
+                    manifest[kind]=repo+':obs-test';manifest[kind+'Id']='sha256:test'
+                (base/'offline-images.json').write_text(json.dumps(manifest))
             calls=[];statefile=[]
             def run(*command):
                 calls.append(command)
@@ -21,13 +26,22 @@ class OneClickTest(unittest.TestCase):
                 if 'accept' in command:
                     statefile[0].write_text(json.dumps({'phase':failure or 'ACCEPTED'}))
                     if failure:raise RuntimeError('simulated activation failure')
-            with patch.object(oneclick,'run',side_effect=run),patch.object(oneclick,'validate_install'),patch.object(oneclick,'wait_healthy') as health:
-                if failure:
+            with patch.object(oneclick,'run',side_effect=run),patch.object(oneclick,'validate_install'),patch.object(oneclick,'inspect',return_value={'Id':'wrong' if mismatch else 'sha256:test'}),patch.object(oneclick,'wait_healthy') as health:
+                if failure or mismatch:
                     with self.assertRaises(RuntimeError):oneclick.execute(args,base)
                     health.assert_not_called()
                 else:
                     oneclick.execute(args,base);health.assert_called_once_with('doris-gateway')
             return calls
+    def test_prebuilt_package_updates_all_three_images_without_build(self):
+        calls=self.scenario(offline=True)
+        self.assertEqual(('docker','load','-i'),calls[1][:3])
+        stage=next(c for c in calls if 'stage' in c)
+        self.assertIn('--platform-image',stage)
+        self.assertFalse(any('bash'==c[0] for c in calls))
+    def test_prebuilt_image_mismatch_stops_before_stopping_services(self):
+        calls=self.scenario(offline=True,mismatch=True)
+        self.assertFalse(any('stage' in c for c in calls))
     def test_success_automates_build_backup_and_activation_without_claiming_business_test(self):
         calls=self.scenario()
         self.assertEqual('sha256sum',calls[0][0]);self.assertEqual('bash',calls[1][0])

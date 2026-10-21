@@ -1,5 +1,22 @@
 # 一键更新
 
+## 完整镜像包（包含 offline-images.json）
+
+解压到一个新的目录，不覆盖原安装目录。进入解压出的 clean-install 后执行：
+
+```bash
+sha256sum -c SHA256SUMS
+bash update.sh --install-dir /data/doris-gateway/install_dir --backup-dir /data/doris-gateway-backups
+```
+
+完整包直接加载三份预构建镜像，同时更新 Worker、Proxy、Platform；不需要 Maven、联网或 Docker Compose。不包含任何测试服务器数据库、账号、密钥或业务配置。默认容器名是 doris-gateway-worker/proxy/platform；其他统一前缀使用 --prefix。名称不符合此前提时先核实，不要猜测删除容器。
+
+升级保留原 ENV 文件、挂载与数据，必须在维护窗口执行。不要对旧安装运行 install.sh init。`OBSERVABILITY_ENABLED=false` 可在对应进程环境中关闭采集；可选诊断落盘默认关闭。
+
+全新安装：先 `docker load -i gateway-images.tar.gz`，复制 install.conf.example 为 install.conf 并配置专用目录、端口，执行 `bash install.sh init`、`bash install.sh start`。基础规则随程序初始化；不复制已有环境配置。完整镜像包中的 install.sh 已绑定本包版本。
+
+以下为旧增量 JAR 包说明，完整镜像包无需离线构建镜像。
+
 把新包解压到 `/data` 后，直接执行：
 
 ```bash

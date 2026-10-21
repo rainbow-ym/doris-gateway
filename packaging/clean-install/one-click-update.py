@@ -46,10 +46,22 @@ def execute(args,base):
     helper=str(base/'safe-upgrade.py')
     statepath=None
     try:
-        run('bash',str(base/'build-sm4-performance-images.sh'),worker,proxy,tag)
+        manifest=base/'offline-images.json'
+        if manifest.exists():
+            with manifest.open() as f: images=json.load(f)
+            archive=images['archive']
+            if not re.fullmatch(r'[a-zA-Z0-9_.-]+',archive):raise RuntimeError('离线镜像文件名无效')
+            for kind,repository in [('worker','doris-security-gateway-admin'),('proxy','doris-security-gateway'),('platform','doris-security-gateway-platform')]:
+                if not re.fullmatch(re.escape(repository)+r':[a-z0-9][a-z0-9.-]{0,90}',images[kind]):raise RuntimeError('镜像名称无效')
+            run('docker','load','-i',str(base/archive))
+            for kind in ('worker','proxy','platform'):
+                if inspect(images[kind])['Id']!=images[kind+'Id']:raise RuntimeError('镜像 ID 与清单不一致：'+kind)
+            image_args=['--worker-image',images['worker'],'--proxy-image',images['proxy'],'--platform-image',images['platform']]
+        else:
+            run('bash',str(base/'build-sm4-performance-images.sh'),worker,proxy,tag)
+            image_args=['--worker-image','doris-security-gateway-admin:'+tag,'--proxy-image','doris-security-gateway:'+tag]
         run(sys.executable,helper,'stage','--worker',worker,'--proxy',proxy,'--platform',platform,
-            '--worker-image','doris-security-gateway-admin:'+tag,'--proxy-image','doris-security-gateway:'+tag,
-            '--backup-root',str(session),'--maintenance-confirmed')
+            *image_args,'--backup-root',str(session),'--maintenance-confirmed')
         states=list(session.glob('upgrade-*/state.json'))
         if len(states)!=1:raise RuntimeError('无法唯一确认本次备份状态；停止，不猜测恢复路径')
         statepath=states[0]
