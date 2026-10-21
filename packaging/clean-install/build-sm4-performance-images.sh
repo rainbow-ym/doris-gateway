@@ -1,35 +1,42 @@
 #!/usr/bin/env bash
-# Offline overlay of the existing runtime; does not stop or replace containers.
+# Offline overlays of the running images; builds do not replace containers.
 set -euo pipefail
 set +x
 base="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 worker="${1:-doris-gateway-worker}"
 proxy="${2:-doris-gateway-proxy}"
 tag="${3:-sm4-perf-20261020}"
+platform="${4:-doris-gateway-platform}"
 [[ "$tag" =~ ^[a-z0-9][a-z0-9.-]{0,90}$ ]] || { echo '镜像版本格式无效'; exit 2; }
-for name in "$worker" "$proxy"; do
-  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo '容器名无效'; exit 2; }
-done
 cd "$base"
 sha256sum -c SHA256SUMS
-worker_base="$(docker inspect --format '{{.Image}}' "$worker")"
-proxy_base="$(docker inspect --format '{{.Image}}' "$proxy")"
-for id in "$worker_base" "$proxy_base"; do
+names=("$worker" "$proxy")
+repositories=(doris-security-gateway-admin doris-security-gateway)
+jars=(doris-security-gateway-admin-0.1.0.jar doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar)
+destinations=(/opt/gateway-admin/app.jar /opt/shardingsphere-proxy/hardening-lib/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar)
+if [[ -f gateway-platform-0.1.0.jar ]]; then
+  names+=("$platform"); repositories+=(doris-security-gateway-platform)
+  jars+=(gateway-platform-0.1.0.jar); destinations+=(/opt/gateway-platform/app.jar)
+fi
+bases=()
+for i in "${!names[@]}"; do
+  [[ "${names[$i]}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo '容器名无效'; exit 2; }
+  id="$(docker inspect --format '{{.Image}}' "${names[$i]}")"
   [[ "$id" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo '无法确认原镜像'; exit 2; }
-done
-docker exec "$worker" /usr/bin/bash -c 'test -f /opt/gateway-admin/app.jar'
-docker exec "$proxy" /usr/bin/bash -c 'test -f /opt/shardingsphere-proxy/hardening-lib/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar'
-for image in "doris-security-gateway-admin:$tag" "doris-security-gateway:$tag"; do
-  if docker image inspect "$image" >/dev/null 2>&1; then
-    echo "目标镜像已存在，停止以免覆盖：$image"
-    exit 2
+  bases+=("$id")
+  docker exec "${names[$i]}" /usr/bin/bash -c "test -f ${destinations[$i]}"
+  if docker image inspect "${repositories[$i]}:$tag" >/dev/null 2>&1; then
+    echo "目标镜像已存在，停止以免覆盖：${repositories[$i]}:$tag"; exit 2
   fi
 done
 temporary="$(mktemp -d)"
-trap 'rm -f "$temporary/Dockerfile.worker" "$temporary/Dockerfile.proxy" "$temporary/doris-security-gateway-admin-0.1.0.jar" "$temporary/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar"; rmdir "$temporary"' EXIT
-cp "$base/doris-security-gateway-admin-0.1.0.jar" "$base/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar" "$temporary/"
-printf 'FROM %s\nCOPY doris-security-gateway-admin-0.1.0.jar /opt/gateway-admin/app.jar\n' "$worker_base" > "$temporary/Dockerfile.worker"
-printf 'FROM %s\nCOPY doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar /opt/shardingsphere-proxy/hardening-lib/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar\n' "$proxy_base" > "$temporary/Dockerfile.proxy"
-docker build --pull=false --network=none -f "$temporary/Dockerfile.worker" -t "doris-security-gateway-admin:$tag" "$temporary"
-docker build --pull=false --network=none -f "$temporary/Dockerfile.proxy" -t "doris-security-gateway:$tag" "$temporary"
-echo '两份离线增量镜像已构建，运行中的服务未修改。请按 README-PERFORMANCE.md 冷备、隔离验证后开放业务。'
+cleanup() { for i in "${!names[@]}"; do rm -f -- "$temporary/Dockerfile.$i" "$temporary/${jars[$i]}"; done; rmdir -- "$temporary"; }
+trap cleanup EXIT
+for i in "${!names[@]}"; do
+  cp -- "$base/${jars[$i]}" "$temporary/"
+  printf 'FROM %s\nCOPY %s %s\n' "${bases[$i]}" "${jars[$i]}" "${destinations[$i]}" > "$temporary/Dockerfile.$i"
+done
+for i in "${!names[@]}"; do
+  docker build --pull=false --network=none -f "$temporary/Dockerfile.$i" -t "${repositories[$i]}:$tag" "$temporary"
+done
+echo "${#names[@]} 份离线增量镜像已构建，运行中的服务未修改。"

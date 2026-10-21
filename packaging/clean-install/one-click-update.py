@@ -58,8 +58,10 @@ def execute(args,base):
                 if inspect(images[kind])['Id']!=images[kind+'Id']:raise RuntimeError('镜像 ID 与清单不一致：'+kind)
             image_args=['--worker-image',images['worker'],'--proxy-image',images['proxy'],'--platform-image',images['platform']]
         else:
-            run('bash',str(base/'build-sm4-performance-images.sh'),worker,proxy,tag)
+            run('bash',str(base/'build-sm4-performance-images.sh'),worker,proxy,tag,platform)
             image_args=['--worker-image','doris-security-gateway-admin:'+tag,'--proxy-image','doris-security-gateway:'+tag]
+            if (base/'gateway-platform-0.1.0.jar').is_file():
+                image_args+=['--platform-image','doris-security-gateway-platform:'+tag]
         run(sys.executable,helper,'stage','--worker',worker,'--proxy',proxy,'--platform',platform,
             *image_args,'--backup-root',str(session),'--maintenance-confirmed')
         states=list(session.glob('upgrade-*/state.json'))

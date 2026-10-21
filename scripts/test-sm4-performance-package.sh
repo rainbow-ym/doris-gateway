@@ -2,7 +2,10 @@
 # Test the assembled bundle with a mocked Docker function; never calls Docker.
 set -euo pipefail
 package="${1:?Provide the assembled package directory}"
-export SM4_BUILD_TEST_LOG
+expected=2
+[[ ! -f "$package/gateway-platform-0.1.0.jar" ]] || expected=3
+export SM4_BUILD_TEST_LOG SM4_EXPECTED
+SM4_EXPECTED="$expected"
 SM4_BUILD_TEST_LOG="$(mktemp)"
 trap 'rm -f "$SM4_BUILD_TEST_LOG"' EXIT
 docker() {
@@ -16,7 +19,8 @@ docker() {
       local context="${@: -1}"
       [[ -s "$context/doris-security-gateway-admin-0.1.0.jar" &&
          -s "$context/doris-security-gateway-mask-plugin-0.1.0-SNAPSHOT.jar" ]] || return 2
-      [[ "$(find "$context" -type f | wc -l)" -eq 4 ]] || return 2
+      [[ "$(find "$context" -type f | wc -l)" -eq $((SM4_EXPECTED * 2)) ]] || return 2
+      if [[ "$SM4_EXPECTED" -eq 3 ]]; then [[ -s "$context/gateway-platform-0.1.0.jar" ]] || return 2; fi
       printf 'build\n' >> "$SM4_BUILD_TEST_LOG"
       ;;
     *) echo "Unexpected Docker mutation: $1" >&2; return 2 ;;
@@ -24,5 +28,5 @@ docker() {
 }
 export -f docker
 bash "$package/build-sm4-performance-images.sh"
-[[ "$(wc -l < "$SM4_BUILD_TEST_LOG")" -eq 2 ]]
-echo 'PASS: two isolated offline image builds; no runtime/container operation.'
+[[ "$(wc -l < "$SM4_BUILD_TEST_LOG")" -eq "$expected" ]]
+echo 'PASS: isolated offline image builds; no runtime/container operation.'
