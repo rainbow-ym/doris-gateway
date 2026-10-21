@@ -44,6 +44,8 @@ public final class Telemetry {
             if (error instanceof java.net.SocketTimeoutException || error instanceof java.sql.SQLTimeoutException) return Reason.TIMEOUT;
             if (error instanceof java.sql.SQLException) {
                 java.sql.SQLException sql=(java.sql.SQLException)error;
+                if ("0A000".equals(sql.getSQLState())) return Reason.TYPE_UNSUPPORTED;
+                if ("54000".equals(sql.getSQLState())) return Reason.LIMIT_EXCEEDED;
                 if (sql.getErrorCode()==1142 || sql.getErrorCode()==1044 || sql.getErrorCode()==1045) return Reason.PERMISSION_DENIED;
                 return Reason.DEPENDENCY_UNAVAILABLE;
             }

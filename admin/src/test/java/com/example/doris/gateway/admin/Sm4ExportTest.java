@@ -510,4 +510,76 @@ class Sm4ExportTest {
   mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/sm4-export/decrypt").principal(()->"admin").contentType("application/json").content(json.writeValueAsBytes(Collections.singletonMap("csv",csv)))).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isForbidden());
  }
 
+ String typedDigest(List<String> labels,List<String> row)throws Exception{
+  return Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(new ObjectMapper().writeValueAsBytes(Arrays.asList(labels,Collections.singletonList(row)))));
+ }
+ Map<String,Object> typedRequest(boolean editable)throws Exception{
+  Map<String,Object> p=profile(true);p.put("allowEdit",editable);p.put("maxRows",200);service.save(p);
+  Map<String,Object> r=request();r.remove("displayed");r.remove("carrier");r.put("format","ROW_TYPED_V1");r.put("allowEdit",editable);
+  r.put("labels",Arrays.asList("证件号码","日期","数值"));r.put("types",Arrays.asList(java.sql.Types.VARCHAR,java.sql.Types.DATE,java.sql.Types.DOUBLE));r.put("typeNames",Arrays.asList("VARCHAR","DATE","DOUBLE"));
+  r.put("originals",Collections.singletonList(Collections.singletonMap("0",Arrays.asList("text","110101199001011234"))));
+  r.put("digests",Collections.singletonList(typedDigest(editable?Collections.singletonList("证件号码"):(List<String>)r.get("labels"),editable?Collections.singletonList("masked"):Arrays.asList("masked","2026-10-21","1.25"))));return r;
+ }
+ @Test void typedSparseProtocolAllowsEditingOrdinaryDatesAndNumbersAndOmitsTheirValues()throws Exception{
+  Map<String,Object> request=typedRequest(true);String serialized=new ObjectMapper().writeValueAsString(request);
+  assertFalse(serialized.contains("2026-10-21"));assertFalse(serialized.contains("1.25"));
+  List<?> tokens=(List<?>)service.captureRows(request).get("envelopes");
+  String csv="新列,数值,证件号码,__gateway_sm4\r\n新增,999.5,masked,"+tokens.get(0)+"\r\n";
+  List<List<String>> output=ExportCsv.parse((String)service.decryptRows(csv,"admin").get("csv"));
+  assertEquals(Arrays.asList("新增","999.5","110101199001011234"),output.get(1));
+  assertThrows(IllegalArgumentException.class,()->service.decryptRows(csv.replace("masked","changed"),"admin"));
+  Map<?,?> packet=new ObjectMapper().readValue(Sm4ExportCodec.decrypt(tokens.get(0).toString(),key),Map.class);assertEquals(5,packet.get("v"));
+  jdbc.update("UPDATE sm4_export_receipts SET expires_at=0");assertThrows(SecurityException.class,()->service.decryptRows(csv,"admin"));
+ }
+ @Test void typedStrictModeKeepsOrdinaryContentAndOrderChecks()throws Exception{
+  List<?> tokens=(List<?>)service.captureRows(typedRequest(false)).get("envelopes");
+  String csv="证件号码,日期,数值,__gateway_sm4\r\nmasked,2026-10-21,1.25,"+tokens.get(0)+"\r\n";
+  assertTrue(service.decryptRows(csv,"admin").get("csv").toString().contains("110101199001011234"));
+  assertThrows(IllegalArgumentException.class,()->service.decryptRows(csv.replace("2026-10-21","2026-10-22"),"admin"));
+  assertThrows(IllegalArgumentException.class,()->service.decryptRows(csv.replace("日期,数值","数值,日期"),"admin"));
+  Map<String,Object> p=profile(true);p.put("allowEdit",true);service.save(p);
+  assertThrows(IllegalArgumentException.class,()->service.decryptRows(csv.replace("1.25","1.26"),"admin"));
+ }
+ @Test void typedOriginalsRestorePrecisionTemporalNullAndBinaryWithoutGuessing()throws Exception{
+  Map<String,Object> r=typedRequest(true);
+  List<Object> values=Arrays.asList(new java.math.BigInteger("170141183460469231731687303715884105727"),new java.math.BigDecimal("12345678901234567890.123456789"),java.time.LocalDateTime.parse("2026-10-21T01:02:03.123456789"),java.time.OffsetDateTime.parse("2026-10-21T01:02:03.123456+08:00"),true,null,"",new byte[]{0,-1},"{\"a\":[1,null,\"中文\"]}","-838:59:59.999999");
+  Map<String,Object> originals=new LinkedHashMap<>();List<String> labels=new ArrayList<>(),shown=new ArrayList<>(),typeNames=new ArrayList<>();List<Integer> types=new ArrayList<>();
+  for(int n=0;n<values.size();n++){labels.add("p"+n);shown.add("mask"+n);types.add(java.sql.Types.VARCHAR);typeNames.add("VARCHAR");originals.put(String.valueOf(n),com.example.doris.gateway.export.ExportValue.encode(values.get(n)));}
+  r.put("labels",labels);r.put("types",types);r.put("typeNames",typeNames);r.put("originals",Collections.singletonList(originals));r.put("digests",Collections.singletonList(typedDigest(labels,shown)));
+  List<?> tokens=(List<?>)service.captureRows(r).get("envelopes");
+  List<String> header=new ArrayList<>(labels);header.add("__gateway_sm4");List<String> row=new ArrayList<>(shown);row.add(tokens.get(0).toString());
+  List<List<String>> out=ExportCsv.parse((String)service.decryptRows(ExportCsv.write(Arrays.asList(header,row)),"admin").get("csv"));
+  assertEquals("170141183460469231731687303715884105727",out.get(1).get(0));assertEquals("12345678901234567890.123456789",out.get(1).get(1));
+  assertEquals("2026-10-21 01:02:03.123456789",out.get(1).get(2));assertEquals("AP8=",out.get(1).get(7));assertEquals("",out.get(1).get(5));assertEquals("",out.get(1).get(6));
+  assertEquals("'-838:59:59.999999",out.get(1).get(9));
+ }
+ @Test void typedProtocolRejectsChangedModeInvalidTagsAndRollsBackMetadataFailure()throws Exception{
+  Map<String,Object> r=typedRequest(true);r.put("allowEdit",false);assertThrows(IllegalStateException.class,()->service.captureRows(r));r.put("allowEdit",true);
+  r.put("originals",Collections.singletonList(Collections.singletonMap("0",Arrays.asList("unknown","secret"))));assertThrows(IllegalArgumentException.class,()->service.captureRows(r));
+  assertTrue(service.receipts().isEmpty());final Map<String,Object> valid=typedRequest(true);
+  jdbc.execute("ALTER TABLE sm4_export_batches ADD CONSTRAINT typed_reject CHECK (id='impossible')");
+  assertThrows(Exception.class,()->transactionalService().captureRows(valid));assertTrue(service.receipts().isEmpty());
+  assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM audit_log WHERE action='SM4_EXPORT_CAPTURED'",Integer.class));
+ }
+ @Test void fiveTypedUsersEachCapture180RowsWithIsolatedBatches()throws Exception{
+  Map<String,Object> template=typedRequest(true);
+  java.util.concurrent.ExecutorService pool=java.util.concurrent.Executors.newFixedThreadPool(5);List<java.util.concurrent.Future<?>> tasks=new ArrayList<>();
+  java.util.concurrent.CountDownLatch ready=new java.util.concurrent.CountDownLatch(5);
+  try{
+   for(int u=0;u<5;u++){
+    final String user="typed"+u;when(access.resolve(user,"db")).thenReturn(new LinkedHashMap<>(account));
+    Map<String,Object> p=profile(true);p.put("username",user);p.put("allowEdit",true);p.put("maxRows",200);service.save(p);
+    tasks.add(pool.submit(()->{try{
+     ready.countDown();assertTrue(ready.await(10,java.util.concurrent.TimeUnit.SECONDS));Map<String,Object> r=new LinkedHashMap<>(template);r.put("username",user);
+     List<Map<String,Object>> raw=new ArrayList<>();List<String> digests=new ArrayList<>();
+     for(int n=0;n<180;n++){raw.add(Collections.singletonMap("0",Arrays.asList("text",user+"-"+n)));digests.add(typedDigest(Collections.singletonList("证件号码"),Collections.singletonList("masked")));}
+     r.put("originals",raw);r.put("digests",digests);List<?> tokens=(List<?>)transactionalService().captureRows(r).get("envelopes");assertEquals(180,tokens.size());
+     for(int n=0;n<180;n++){Map<?,?> packet=new ObjectMapper().readValue(Sm4ExportCodec.decrypt(tokens.get(n).toString(),key),Map.class);assertEquals(5,packet.get("v"));assertEquals(Collections.singletonList(Arrays.asList("text",user+"-"+n)),packet.get("o"));}
+    }catch(Exception e){throw new RuntimeException(e);}}));
+   }
+   for(java.util.concurrent.Future<?> task:tasks)task.get(30,java.util.concurrent.TimeUnit.SECONDS);
+   assertEquals(5,jdbc.queryForObject("SELECT COUNT(*) FROM sm4_export_batches",Integer.class));
+  }finally{pool.shutdownNow();}
+ }
+
 }

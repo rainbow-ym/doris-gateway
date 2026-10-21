@@ -1,5 +1,7 @@
 # 一键更新
 
+本次类型适配增量包目录为 `sm4-types-oneclick-20261021`，包含 Worker、Proxy、Platform 三份 JAR，依赖服务器已有运行镜像。请阅读 `SM4-DORIS4-TYPES.md`；受保护列改为文本类型，普通列保留原类型。
+
 ## 完整镜像包（包含 offline-images.json）
 
 解压到一个新的目录，不覆盖原安装目录。进入解压出的 clean-install 后执行：
@@ -20,7 +22,7 @@ bash update.sh --install-dir /data/doris-gateway/install_dir --backup-dir /data/
 把新包解压到 `/data` 后，直接执行：
 
 ```bash
-bash /data/sm4-flexible-oneclick-20261021/update.sh \
+bash /data/sm4-types-oneclick-20261021/update.sh \
   --install-dir /data/doris-gateway/install_dir \
   --backup-dir /data/doris-gateway-backups
 ```
