@@ -33,28 +33,88 @@ public class Sm4ExportService {
         jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_profiles(username VARCHAR(128),database_name VARCHAR(255),enabled BOOLEAN NOT NULL,allow_decrypt BOOLEAN NOT NULL,max_rows INT NOT NULL,ttl_minutes INT NOT NULL,PRIMARY KEY(username,database_name))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_receipts(id VARCHAR(36) PRIMARY KEY,username VARCHAR(128),database_name VARCHAR(255),expires_at BIGINT NOT NULL,revoked BOOLEAN NOT NULL DEFAULT FALSE,row_count INT NOT NULL,nonce VARCHAR(64) NOT NULL UNIQUE)");
         jdbc.execute("ALTER TABLE sm4_export_profiles ADD COLUMN IF NOT EXISTS row_key_column VARCHAR(255) NOT NULL DEFAULT ''");
+        jdbc.execute("ALTER TABLE sm4_export_profiles ADD COLUMN IF NOT EXISTS allow_edit BOOLEAN NOT NULL DEFAULT FALSE");
+        jdbc.execute("ALTER TABLE sm4_export_profiles ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE");
+        jdbc.execute("UPDATE sm4_export_profiles SET allow_edit=TRUE,row_key_column='' WHERE row_key_column<>''");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_defaults(id INT PRIMARY KEY,linked BOOLEAN NOT NULL,enabled BOOLEAN NOT NULL,allow_decrypt BOOLEAN NOT NULL,allow_edit BOOLEAN NOT NULL,max_rows INT NOT NULL,ttl_minutes INT NOT NULL)");
+        jdbc.execute("INSERT INTO sm4_export_defaults SELECT 1,FALSE,FALSE,FALSE,TRUE,200,1440 WHERE NOT EXISTS(SELECT 1 FROM sm4_export_defaults WHERE id=1)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS sm4_export_batches(id VARCHAR(36) PRIMARY KEY REFERENCES sm4_export_receipts(id) ON DELETE CASCADE,metadata CLOB NOT NULL)");
         jdbc.execute("CREATE INDEX IF NOT EXISTS sm4_export_expiry ON sm4_export_receipts(expires_at)");
         if(auditRetentionDays>0)jdbc.execute("CREATE INDEX IF NOT EXISTS sm4_audit_retention ON audit_log(action,created_at)");
 
     }
-    public List<Map<String,Object>> profiles(){return jdbc.queryForList("SELECT username,database_name AS databaseName,enabled,allow_decrypt AS allowDecrypt,max_rows AS maxRows,ttl_minutes AS ttlMinutes,row_key_column AS rowKeyColumn FROM sm4_export_profiles ORDER BY username,database_name");}
+    private static final String PROFILE_FIELDS="enabled,allow_decrypt AS allowDecrypt,allow_edit AS allowEdit,max_rows AS maxRows,ttl_minutes AS ttlMinutes,row_key_column AS rowKeyColumn,deleted";
+    public List<Map<String,Object>> profiles(){
+        List<Map<String,Object>> result=jdbc.queryForList("SELECT username,database_name AS databaseName,"+PROFILE_FIELDS+" FROM sm4_export_profiles ORDER BY username,database_name");
+        Set<List<Object>> explicit=new HashSet<>();
+        for(Map<String,Object> row:result){explicit.add(Arrays.asList(row.get("username"),row.get("databaseName")));row.put("source","人工配置");}
+        result.removeIf(row->Boolean.TRUE.equals(row.get("deleted")));
+        Map<String,Object> defaults=defaults();
+        if(Boolean.TRUE.equals(defaults.get("linked")))for(Map<String,Object> binding:eligibleBindings()){
+            if(!explicit.contains(Arrays.asList(binding.get("username"),binding.get("databaseName")))){
+                Map<String,Object> row=new LinkedHashMap<>(defaults);row.putAll(binding);row.put("source","自动关联");result.add(row);
+            }
+        }
+        return result;
+    }
+    private List<Map<String,Object>> eligibleBindings(){
+        return jdbc.queryForList("SELECT DISTINCT c.username,b.logical_name AS databaseName FROM account_database_bindings b JOIN connections c ON c.id=b.connection_id JOIN logical_databases d ON d.logical_name=b.logical_name WHERE b.status='ACTIVE' AND d.status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM account_lifecycle_states l WHERE l.username=c.username AND l.status<>'ACTIVE')");
+    }
+    public Map<String,Object> defaults(){Telemetry.current().add(Measure.SYSTEM_DB_CALLS,1);return jdbc.queryForMap("SELECT linked,enabled,allow_decrypt AS allowDecrypt,allow_edit AS allowEdit,max_rows AS maxRows,ttl_minutes AS ttlMinutes FROM sm4_export_defaults WHERE id=1");}
+    @org.springframework.transaction.annotation.Transactional(rollbackFor=Exception.class)
+    public void saveDefaults(Map<String,Object> r)throws Exception{
+        int rows=number(r,"maxRows",200,1,1000),ttl=ttl(r,defaults());
+        if(Boolean.TRUE.equals(r.get("linked"))&&Boolean.TRUE.equals(r.get("enabled")))key(currentKey);
+        jdbc.update("UPDATE sm4_export_defaults SET linked=?,enabled=?,allow_decrypt=?,allow_edit=?,max_rows=?,ttl_minutes=? WHERE id=1",Boolean.TRUE.equals(r.get("linked")),Boolean.TRUE.equals(r.get("enabled")),Boolean.TRUE.equals(r.get("allowDecrypt")),Boolean.TRUE.equals(r.get("allowEdit")),rows,ttl);
+        store.audit("SM4_EXPORT_DEFAULTS_CHANGED","linked="+Boolean.TRUE.equals(r.get("linked"))+",enabled="+Boolean.TRUE.equals(r.get("enabled"))+",decrypt="+Boolean.TRUE.equals(r.get("allowDecrypt")));
+    }
     public Map<String,Object> profile(String user,String db){
         try(Observation.Scope ignored=Telemetry.current().stage(Stage.POLICY)){
-        Telemetry.current().add(Measure.SYSTEM_DB_CALLS,1);
-        List<Map<String,Object>> rows=jdbc.queryForList("SELECT enabled,allow_decrypt AS allowDecrypt,max_rows AS maxRows,ttl_minutes AS ttlMinutes,row_key_column AS rowKeyColumn FROM sm4_export_profiles WHERE username=? AND database_name=?",user,db);
-        return rows.isEmpty()?Collections.singletonMap("enabled",false):rows.get(0);
+            Telemetry.current().add(Measure.SYSTEM_DB_CALLS,1);
+            List<Map<String,Object>> rows=jdbc.queryForList("SELECT "+PROFILE_FIELDS+" FROM sm4_export_profiles WHERE username=? AND database_name=?",user,db);
+            if(!rows.isEmpty())return rows.get(0);
+            Map<String,Object> defaults=defaults();
+            if(Boolean.TRUE.equals(defaults.get("linked"))){
+                Telemetry.current().add(Measure.SYSTEM_DB_CALLS,1);
+                if(jdbc.queryForObject("SELECT COUNT(*) FROM account_database_bindings b JOIN connections c ON c.id=b.connection_id JOIN logical_databases d ON d.logical_name=b.logical_name WHERE c.username=? AND b.logical_name=? AND b.status='ACTIVE' AND d.status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM account_lifecycle_states l WHERE l.username=c.username AND l.status<>'ACTIVE')",Integer.class,user,db)>0)return defaults;
+            }
+            return Collections.singletonMap("enabled",false);
         }
     }
+    private int ttl(Map<String,Object> r,Map<String,Object> previous){
+        if(r.containsKey("ttlDays")){
+            if(r.containsKey("ttlMinutes"))throw new IllegalArgumentException("有效期请只提交天数或分钟。");
+            return number(r,"ttlDays",1,1,365)*1440;
+        }
+        return number(r,"ttlMinutes",((Number)previous.getOrDefault("ttlMinutes",60)).intValue(),1,365*1440);
+    }
+    @org.springframework.transaction.annotation.Transactional(rollbackFor=Exception.class)
     public void save(Map<String,Object> r)throws Exception {
         String user=text(r,"username"),db=text(r,"databaseName");access.resolve(user,db);
-        int rows=number(r,"maxRows",200,1,1000),ttl=number(r,"ttlMinutes",60,1,1440);
-        Object supplied=r.containsKey("rowKeyColumn")?r.get("rowKeyColumn"):profile(user,db).getOrDefault("rowKeyColumn","");
+        Map<String,Object> previous=profile(user,db);
+        int rows=number(r,"maxRows",200,1,1000),ttl=ttl(r,previous);
+        // Keep old API callers compatible; the new UI only writes allowEdit, never a business column.
+        Object supplied=r.containsKey("rowKeyColumn")?r.get("rowKeyColumn"):previous.getOrDefault("rowKeyColumn","");
         if(!(supplied instanceof String)||((String)supplied).length()>255||"__gateway_sm4".equalsIgnoreCase((String)supplied))throw new IllegalArgumentException("记录标识列无效。");
-        String anchor=(String)supplied;
+        boolean edit=Boolean.TRUE.equals(r.getOrDefault("allowEdit",previous.get("allowEdit")));
+        String anchor=r.containsKey("allowEdit")?"":(String)supplied;
         if(Boolean.TRUE.equals(r.get("enabled")))key(currentKey);
-        jdbc.update("MERGE INTO sm4_export_profiles(username,database_name,enabled,allow_decrypt,max_rows,ttl_minutes,row_key_column) KEY(username,database_name) VALUES(?,?,?,?,?,?,?)",user,db,Boolean.TRUE.equals(r.get("enabled")),Boolean.TRUE.equals(r.get("allowDecrypt")),rows,ttl,anchor);
+        jdbc.update("MERGE INTO sm4_export_profiles(username,database_name,enabled,allow_decrypt,max_rows,ttl_minutes,row_key_column,allow_edit,deleted) KEY(username,database_name) VALUES(?,?,?,?,?,?,?,?,FALSE)",user,db,Boolean.TRUE.equals(r.get("enabled")),Boolean.TRUE.equals(r.get("allowDecrypt")),rows,ttl,anchor,edit);
         store.audit("SM4_EXPORT_PROFILE_CHANGED","user="+user+",database="+db+",enabled="+Boolean.TRUE.equals(r.get("enabled"))+",decrypt="+Boolean.TRUE.equals(r.get("allowDecrypt")));
+    }
+    @org.springframework.transaction.annotation.Transactional(rollbackFor=Exception.class)
+    public void saveBatch(Map<String,Object> r)throws Exception{
+        Object supplied=r.get("databaseNames");
+        if(!(supplied instanceof List)||((List<?>)supplied).isEmpty()||((List<?>)supplied).size()>100)throw new IllegalArgumentException("请选择 1—100 个逻辑库。");
+        Set<Object> seen=new HashSet<>();
+        for(Object db:(List<?>)supplied){if(!seen.add(db))throw new IllegalArgumentException("逻辑库不能重复。");Map<String,Object> item=new LinkedHashMap<>(r);item.put("databaseName",db);save(item);}
+    }
+    @org.springframework.transaction.annotation.Transactional(rollbackFor=Exception.class)
+    public void deleteProfile(Map<String,Object> r){
+        String user=text(r,"username"),db=text(r,"databaseName");
+        // A tombstone prevents auto-link from silently granting a deleted profile again.
+        jdbc.update("MERGE INTO sm4_export_profiles(username,database_name,enabled,allow_decrypt,max_rows,ttl_minutes,row_key_column,allow_edit,deleted) KEY(username,database_name) VALUES(?,?,FALSE,FALSE,200,1440,'',FALSE,TRUE)",user,db);
+        store.audit("SM4_EXPORT_PROFILE_DELETED","user="+user+",database="+db);
     }
     private byte[] key(String id)throws Exception {
         try(Observation.Scope ignored=Telemetry.current().stage(Stage.KEY_LOAD)){
@@ -139,7 +199,7 @@ public class Sm4ExportService {
         // Reuse only within this request: later queries must recheck identity and authorization.
         List<Map<String,String>> boundSources=bindSources(sources,false);
         byte[] encryptionKey=key(currentKey);
-        if(!String.valueOf(policy.getOrDefault("rowKeyColumn","")).isEmpty())return captureEditable(request,policy,account,boundSources,encryptionKey);
+        if(Boolean.TRUE.equals(policy.get("allowEdit"))||!String.valueOf(policy.getOrDefault("rowKeyColumn","")).isEmpty())return captureEditable(request,policy,account,boundSources,encryptionKey);
         List<Object[]> receipts=new ArrayList<>();
         List<String> envelopes=new ArrayList<>();long size=0;
         for(int i=0;i<rows.size();i++){
@@ -167,7 +227,7 @@ public class Sm4ExportService {
             Map<?,?> packet;
             try{packet=json.readValue(decryptObserved(envelope,key(Sm4ExportCodec.keyId(envelope))),Map.class);}
             catch(Exception e){store.audit("SM4_EXPORT_DECRYPT_DENIED","id=unverified,administrator="+administrator);throw e;}
-            if(Integer.valueOf(3).equals(packet.get("v")))return decryptEditable(fullHeader,input,administrator);
+            if(Integer.valueOf(3).equals(packet.get("v"))||Integer.valueOf(4).equals(packet.get("v")))return decryptEditable(fullHeader,input,administrator,((Number)packet.get("v")).intValue());
         }
         List<String> labels=new ArrayList<>(fullHeader.subList(0,fullHeader.size()-1));
         List<List<String>> output=new ArrayList<>();output.add(labels);
@@ -190,8 +250,9 @@ public class Sm4ExportService {
         List<List<String>> rows=(List<List<String>>)request.get("displayed");
         List<Map<String,Object>> originals=(List<Map<String,Object>>)request.get("originals");
         uniqueLabels(labels);
-        String anchor=String.valueOf(policy.get("rowKeyColumn"));int anchorIndex=labels.indexOf(anchor);
-        if(anchorIndex<0)throw new IllegalArgumentException("可编辑导出必须包含记录标识列："+anchor);
+        boolean automatic=Boolean.TRUE.equals(policy.get("allowEdit"));
+        String anchor=String.valueOf(policy.get("rowKeyColumn"));int anchorIndex=automatic?-1:labels.indexOf(anchor);
+        if(!automatic&&anchorIndex<0)throw new IllegalArgumentException("可编辑导出必须包含记录标识列："+anchor);
         if(rows.isEmpty())return Collections.singletonMap("envelopes",Collections.emptyList());
         List<Integer> protectedIndexes=new ArrayList<>();
         for(String index:originals.get(0).keySet()){
@@ -204,12 +265,12 @@ public class Sm4ExportService {
         if(protectedIndexes.isEmpty())throw new IllegalArgumentException("缺少需要恢复的保护字段。");
         List<String> protectedLabels=new ArrayList<>();
         for(int column:protectedIndexes)protectedLabels.add(labels.get(column));
-        List<String> checkedLabels=new ArrayList<>();checkedLabels.add(anchor);checkedLabels.addAll(protectedLabels);
+        List<String> checkedLabels=new ArrayList<>();if(!automatic)checkedLabels.add(anchor);checkedLabels.addAll(protectedLabels);
         String id=UUID.randomUUID().toString();long expires=System.currentTimeMillis()+((Number)policy.get("ttlMinutes")).longValue()*60000;
         Map<String,Object> metadata=new LinkedHashMap<>();
         metadata.put("id",id);metadata.put("username",request.get("username"));metadata.put("database",request.get("database"));
         metadata.put("expires",expires);metadata.put("epoch",account.get("epoch"));metadata.put("sources",sources);
-        metadata.put("checkedLabels",checkedLabels);
+        metadata.put("checkedLabels",checkedLabels);metadata.put("v",automatic?4:3);
         // Common metadata is authenticated and stored once; no original or displayed cell values are stored.
         String metadataEnvelope=encryptObserved(metadata,encryptionKey);
         if(metadataEnvelope.length()>30000)throw new IllegalArgumentException("导出来源元数据过大，请减少查询字段。");
@@ -217,8 +278,8 @@ public class Sm4ExportService {
         for(int r=0;r<rows.size();r++){
             List<String> row=rows.get(r);Map<String,Object> original=originals.get(r);
             if(row.size()!=labels.size()||!original.keySet().equals(originals.get(0).keySet()))throw new IllegalArgumentException("结果列或保护字段不一致。");
-            String identity=row.get(anchorIndex);
-            if(identity==null||identity.isEmpty()||!anchors.add(identity))throw new IllegalArgumentException("记录标识列必须非空且在本次结果中唯一。");
+            if(!automatic){String identity=row.get(anchorIndex);
+            if(identity==null||identity.isEmpty()||!anchors.add(identity))throw new IllegalArgumentException("记录标识列必须非空且在本次结果中唯一。");}
             List<Object> raw=new ArrayList<>();
             for(int column:protectedIndexes){
                 Object value=original.get(String.valueOf(column));
@@ -228,7 +289,7 @@ public class Sm4ExportService {
                 if(value!=null)Telemetry.current().add(Measure.RAW_BYTES,((String)value).getBytes(StandardCharsets.UTF_8).length);
             }
             Map<String,Object> packet=new LinkedHashMap<>();
-            packet.put("v",3);packet.put("b",id);packet.put("r",r);packet.put("o",raw);
+            packet.put("v",automatic?4:3);packet.put("b",id);packet.put("r",r);packet.put("o",raw);
             packet.put("d",digest(checkedLabels,Collections.singletonList(selectColumns(labels,row,checkedLabels))));
             String envelope=encryptObserved(packet,encryptionKey);
             Telemetry.current().add(Measure.CIPHERTEXT_BYTES,envelope.length());
@@ -249,27 +310,28 @@ public class Sm4ExportService {
         List<String> values=new ArrayList<>();
         for(String label:selected){
             int index=labels.indexOf(label);
-            if(index<0)throw new IllegalArgumentException("受保护列或记录标识列被删除、改名："+label);
+            if(index<0)throw new IllegalArgumentException("文件必需列被删除、改名："+label);
             values.add(row.get(index));
         }
         return values;
     }
     @SuppressWarnings("unchecked")
-    private Map<String,Object> decryptEditable(List<String> header,List<List<String>> input,String administrator)throws Exception {
+    private Map<String,Object> decryptEditable(List<String> header,List<List<String>> input,String administrator,int format)throws Exception {
         if(!slots.tryAcquire()){Telemetry.current().reason(Reason.CAPACITY);throw new IllegalStateException("解密服务繁忙，请稍后重试。");}
-        String batch="unverified";
+        String batch="unverified";int csvRow=1;
         try{
             uniqueLabels(header);List<String> labels=new ArrayList<>(header.subList(0,header.size()-1));
             List<List<String>> output=new ArrayList<>();output.add(labels);
             Map<String,byte[]> keys=new HashMap<>();Map<String,Object> metadata=null;
             List<String> checkedLabels=null;Set<Integer> seen=new HashSet<>();int total=0;
             for(List<String> row:input){
+                csvRow++;
                 if(row.size()!=header.size())throw new IllegalArgumentException("CSV 行列数不一致。");
                 String envelope=row.get(row.size()-1),version=Sm4ExportCodec.keyId(envelope);
                 if(!keys.containsKey(version))keys.put(version,key(version));
                 Telemetry.current().add(Measure.CIPHERTEXT_BYTES,envelope.length());
                 Map<String,Object> packet=json.readValue(decryptObserved(envelope,keys.get(version)),Map.class);
-                if(!Integer.valueOf(3).equals(packet.get("v")))throw new IllegalArgumentException("不能混合新旧格式文件。");
+                if(!Integer.valueOf(format).equals(packet.get("v")))throw new IllegalArgumentException("不能混合新旧格式文件。");
                 String id=text(packet,"b");
                 if(metadata==null){
                     batch=id;
@@ -284,10 +346,11 @@ public class Sm4ExportService {
                     if(!id.equals(metadata.get("id"))||((Number)metadata.get("expires")).longValue()<System.currentTimeMillis())
                         throw new SecurityException("查询批次身份或有效期无效。");
                     String user=text(metadata,"username"),db=text(metadata,"database");Map<String,Object> policy=profile(user,db);
-                    if(!Boolean.TRUE.equals(policy.get("enabled"))||!Boolean.TRUE.equals(policy.get("allowDecrypt")))throw new SecurityException("该账号当前没有明文解密授权。");
+                    if(!Boolean.TRUE.equals(policy.get("allowDecrypt")))throw new SecurityException("该账号当前没有明文解密授权。");
                     Map<String,Object> account;try(Observation.Scope ignored=Telemetry.current().stage(Stage.ACCOUNT_CHECK)){account=access.resolve(user,db);}
                     if(!Objects.equals(String.valueOf(account.get("epoch")),String.valueOf(metadata.get("epoch")))){Telemetry.current().reason(Reason.ACCOUNT_CHANGED);throw new SecurityException("原账号凭据版本已变化。");}
                     checkPermissions(account,bindSources((List<Map<String,String>>)metadata.get("sources"),true));
+                    if(format==4&&!Integer.valueOf(4).equals(metadata.get("v")))throw new IllegalArgumentException("密文版本与批次不一致。");
                     checkedLabels=(List<String>)metadata.get("checkedLabels");
                     total=((Number)records.get(0).get("row_count")).intValue();
                 }
@@ -297,11 +360,12 @@ public class Sm4ExportService {
                     throw new IllegalArgumentException("密文行重复或行标识无效。");
                 List<String> checked=selectColumns(labels,row,checkedLabels);
                 if(!digest(checkedLabels,Collections.singletonList(checked)).equals(packet.get("d")))
-                    {Telemetry.current().reason(Reason.TAMPERED);throw new IllegalArgumentException("受保护内容或记录标识被修改，或密文被放到其他记录；拒绝还原。");}
+                    {Telemetry.current().reason(Reason.TAMPERED);throw new IllegalArgumentException(format==4?"受保护内容被修改，或与该行密文不匹配；拒绝还原。":"受保护内容或记录标识被修改，或密文被放到其他记录；拒绝还原。");}
                 List<Object> raw=(List<Object>)packet.get("o");
-                if(raw.size()!=checkedLabels.size()-1)throw new IllegalArgumentException("密文保护字段结构无效。");
+                int offset=format==3?1:0;
+                if(raw.size()!=checkedLabels.size()-offset)throw new IllegalArgumentException("密文保护字段结构无效。");
                 List<String> restored=new ArrayList<>(row.subList(0,labels.size()));
-                for(int i=0;i<raw.size();i++)restored.set(labels.indexOf(checkedLabels.get(i+1)),raw.get(i)==null?"":String.valueOf(raw.get(i)));
+                for(int i=0;i<raw.size();i++)restored.set(labels.indexOf(checkedLabels.get(i+offset)),raw.get(i)==null?"":String.valueOf(raw.get(i)));
                 output.add(restored);
             }
             // Recheck revocation and expiry before releasing any plaintext.
@@ -309,14 +373,14 @@ public class Sm4ExportService {
                 throw new SecurityException("查询批次已过期或撤销。");
             Map<String,Object> currentPolicy=profile(text(metadata,"username"),text(metadata,"database"));
             Map<String,Object> currentAccount=access.resolve(text(metadata,"username"),text(metadata,"database"));
-            if(!Boolean.TRUE.equals(currentPolicy.get("enabled"))||!Boolean.TRUE.equals(currentPolicy.get("allowDecrypt"))
+            if(!Boolean.TRUE.equals(currentPolicy.get("allowDecrypt"))
                     ||!Objects.equals(String.valueOf(currentAccount.get("epoch")),String.valueOf(metadata.get("epoch"))))
                 throw new SecurityException("解密期间账号授权已变化。");
             checkPermissions(currentAccount,bindSources((List<Map<String,String>>)metadata.get("sources"),true));
             store.audit("SM4_EXPORT_DECRYPTED","id="+batch+",administrator="+administrator+",rows="+input.size());
             Map<String,Object> result=new LinkedHashMap<>();result.put("csv",ExportCsv.write(output));
             result.put("filename","decrypted-editable-"+UUID.randomUUID()+".csv");result.put("rowCount",input.size());return result;
-        }catch(Exception e){store.audit("SM4_EXPORT_DECRYPT_DENIED","id="+batch+",administrator="+administrator);throw e;}
+        }catch(Exception e){store.audit("SM4_EXPORT_DECRYPT_DENIED","id="+batch+",administrator="+administrator);if(e instanceof IllegalArgumentException)throw new IllegalArgumentException("CSV 第 "+csvRow+" 行："+e.getMessage(),e);throw e;}
         finally{slots.release();}
     }
     @org.springframework.scheduling.annotation.Scheduled(fixedDelayString="${SM4_EXPORT_CLEANUP_MS:60000}")
@@ -354,7 +418,7 @@ public class Sm4ExportService {
                 Telemetry.current().reason(receipts.size()!=1?Reason.PERMISSION_DENIED:Boolean.TRUE.equals(receipts.get(0).get("revoked"))?Reason.REVOKED:Reason.EXPIRED);
                 throw new SecurityException("密文不属于当前实例、已过期或已撤销。");}
             String user=text(p,"username"),db=text(p,"database");Map<String,Object> policy=profile(user,db);
-            if(!Boolean.TRUE.equals(policy.get("enabled"))||!Boolean.TRUE.equals(policy.get("allowDecrypt")))throw new SecurityException("该账号当前没有明文解密授权。");
+            if(!Boolean.TRUE.equals(policy.get("allowDecrypt")))throw new SecurityException("该账号当前没有明文解密授权。");
             Map<String,Object> account;try(Observation.Scope ignored=Telemetry.current().stage(Stage.ACCOUNT_CHECK)){account=access.resolve(user,db);}
             if(!Objects.equals(String.valueOf(account.get("epoch")),String.valueOf(p.get("epoch")))){Telemetry.current().reason(Reason.ACCOUNT_CHANGED);throw new SecurityException("原账号凭据版本已变化，拒绝解密旧文件。");}
             if(((Number)p.get("carrier")).intValue()!=carrier||!labels.equals(p.get("labels"))||((Number)p.get("rows")).intValue()!=rows.size()||!digest(labels,rows).equals(p.get("digest")))

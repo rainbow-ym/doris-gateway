@@ -7,7 +7,7 @@ spec=importlib.util.spec_from_file_location('oneclick',path)
 oneclick=importlib.util.module_from_spec(spec);spec.loader.exec_module(oneclick)
 
 class OneClickTest(unittest.TestCase):
-    def scenario(self,failure=None,offline=False,mismatch=False):
+    def scenario(self,failure=None,offline=False,mismatch=False,platform_jar=False):
         with tempfile.TemporaryDirectory() as temp:
             base=pathlib.Path(temp);install=base/'install';install.mkdir()
             args=argparse.Namespace(install_dir=str(install),backup_dir=str(base/'backups'),prefix='doris-gateway')
@@ -16,6 +16,7 @@ class OneClickTest(unittest.TestCase):
                 for kind,repo in [('worker','doris-security-gateway-admin'),('proxy','doris-security-gateway'),('platform','doris-security-gateway-platform')]:
                     manifest[kind]=repo+':obs-test';manifest[kind+'Id']='sha256:test'
                 (base/'offline-images.json').write_text(json.dumps(manifest))
+            if platform_jar:(base/'gateway-platform-0.1.0.jar').write_bytes(b'test')
             calls=[];statefile=[]
             def run(*command):
                 calls.append(command)
@@ -33,6 +34,12 @@ class OneClickTest(unittest.TestCase):
                 else:
                     oneclick.execute(args,base);health.assert_called_once_with('doris-gateway')
             return calls
+    def test_incremental_package_includes_platform_console(self):
+        calls=self.scenario(platform_jar=True)
+        build=next(c for c in calls if c[0]=='bash')
+        self.assertEqual('doris-gateway-platform',build[-1])
+        stage=next(c for c in calls if 'stage' in c)
+        self.assertIn('--platform-image',stage)
     def test_prebuilt_package_updates_all_three_images_without_build(self):
         calls=self.scenario(offline=True)
         self.assertEqual(('docker','load','-i'),calls[1][:3])

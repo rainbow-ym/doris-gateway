@@ -20,7 +20,7 @@ bash update.sh --install-dir /data/doris-gateway/install_dir --backup-dir /data/
 把新包解压到 `/data` 后，直接执行：
 
 ```bash
-bash /data/sm4-editable-oneclick-20261020/update.sh \
+bash /data/sm4-flexible-oneclick-20261021/update.sh \
   --install-dir /data/doris-gateway/install_dir \
   --backup-dir /data/doris-gateway-backups
 ```
@@ -42,8 +42,16 @@ bash /data/sm4-editable-oneclick-20261020/update.sh \
 
 ## 更新后启用可编辑 CSV
 
-在 SM4 配置列表点“编辑”，填写“不可修改的记录标识列”（例如 record_id），保存并重新导出。
-标识必须出现在所有相关查询结果中，未脱敏、非空且唯一；留空仍用旧格式。
-新格式允许修改普通列；受保护列、记录标识、最后的密文列不能改内容或删除。
-旧文件仍按旧规则解密；新格式撤销范围是整次查询。详见 SM4-EDITABLE-CSV.md。
-过期解密记录自动清理，历史审计默认保留，不自动删除密钥。
+刷新浏览器页面，在 SM4 配置中勾选“允许编辑普通列后解密”，保存后重新查询导出。
+不填写业务标识列、不修改 SQL。原先配置了标识列的配置自动迁移到新模式，未配置的严格模式需手动开启。
+受保护列只能移动，不能删列、改名、改值；最后的 __gateway_sm4 列必须保留。旧文件继续按旧规则处理。
+
+支持按账号批量配置多个库、编辑和删除；文件期限按天设置（1—365 天）。自动关联默认为关闭，
+开启后影响当前及后续未人工配置、未删除的有效账号＋库关系。人工配置不被覆盖。
+停止加密与停止解密独立；要让已导出的文件永久失效，请撤销批次。
+
+本次增量包更新 Worker、Proxy 和 Platform（包含新的管理页面），适用于已有三服务部署。
+包内不含完整 Docker 运行时镜像，不支持空服务器全新安装；使用现有本地镜像离线构建，不下载依赖。
+
+新模式不能认证普通编辑内容的业务归属，受保护显示值相同的两行交换密文可能无法识别。
+详见 SM4-EDITABLE-CSV.md。请先保留一份原始 CSV，再逐项测试新增普通列、删普通列、改值、排序及篡改拒绝。

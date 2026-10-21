@@ -22,6 +22,10 @@ public class Sm4ExportController {
     }
     @GetMapping("/api/sm4-export/profiles") public Object profiles(){return service.profiles();}
     @PostMapping("/api/sm4-export/profiles") public Object save(@RequestBody Map<String,Object> body)throws Exception{service.save(body);return Collections.singletonMap("message","逐行加密配置已保存，下次查询生效。");}
+    @PostMapping("/api/sm4-export/profiles/batch") public Object batch(@RequestBody Map<String,Object> body)throws Exception{service.saveBatch(body);return Collections.singletonMap("message","所选库配置已保存。");}
+    @DeleteMapping("/api/sm4-export/profiles") public Object delete(@RequestBody Map<String,Object> body){service.deleteProfile(body);return Collections.singletonMap("message","配置已删除，停止加密及解密，自动关联不会补回；可手动重新添加。");}
+    @GetMapping("/api/sm4-export/defaults") public Object defaults(){return service.defaults();}
+    @PostMapping("/api/sm4-export/defaults") public Object defaults(@RequestBody Map<String,Object> body)throws Exception{service.saveDefaults(body);return Collections.singletonMap("message","自动关联默认设置已保存，人工配置保持不变。");}
     @GetMapping("/api/sm4-export/receipts") public Object receipts(){return service.receipts();}
     @PostMapping("/api/sm4-export/receipts/{id}/revoke") public Object revoke(@PathVariable String id){service.revoke(id);return Collections.singletonMap("message","该文件已撤销解密资格。");}
     @PostMapping("/api/sm4-export/decrypt") public ResponseEntity<Object> decrypt(@RequestBody Map<String,String> body,Principal principal)throws Exception{

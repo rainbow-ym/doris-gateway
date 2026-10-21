@@ -379,7 +379,7 @@ class Sm4ExportTest {
   try{
    for(int u=0;u<5;u++){
     final String user="editable"+u;when(access.resolve(user,"db")).thenReturn(new LinkedHashMap<>(account));
-    Map<String,Object> policy=profile(true);policy.put("username",user);policy.put("maxRows",200);policy.put("rowKeyColumn","记录ID");service.save(policy);
+    Map<String,Object> policy=profile(true);policy.put("username",user);policy.put("maxRows",200);policy.put("allowEdit",true);service.save(policy);
     pending.add(pool.submit(()->{
      try{
       Map<String,Object> r=new LinkedHashMap<>(template);r.put("username",user);
@@ -392,7 +392,7 @@ class Sm4ExportTest {
       assertEquals(180,tokens.size());
       for(int n=0;n<tokens.size();n++){
        Map<?,?> packet=new ObjectMapper().readValue(Sm4ExportCodec.decrypt(tokens.get(n).toString(),key),Map.class);
-       assertEquals(Collections.singletonList(user+"-raw-"+n),packet.get("o"));
+       assertEquals(4,packet.get("v"));assertEquals(Collections.singletonList(user+"-raw-"+n),packet.get("o"));
        String metadata=jdbc.queryForObject("SELECT metadata FROM sm4_export_batches WHERE id=?",String.class,packet.get("b"));
        Map<?,?> common=new ObjectMapper().readValue(Sm4ExportCodec.decrypt(metadata,key),Map.class);
        assertEquals(user,common.get("username"));
@@ -407,4 +407,107 @@ class Sm4ExportTest {
    verify(identities,times(5)).identity(1,"PUBLIC","src");
   }finally{pool.shutdownNow();}
  }
+ Map<String,Object> automaticRequest()throws Exception{
+  Map<String,Object> p=profile(true);p.put("allowEdit",true);p.put("ttlDays",365);service.save(p);
+  Map<String,Object> r=request();r.put("format","ROW_V2");
+  r.put("labels",Arrays.asList("证件号码","备注"));r.put("displayed",Arrays.asList(Arrays.asList("mask-A","old"),Arrays.asList("mask-B","old")));
+  r.put("originals",Arrays.asList(Collections.singletonMap("0","raw-A"),Collections.singletonMap("0","raw-B")));return r;
+ }
+ @Test void automaticRowsNeedNoBusinessIdentifierAndAllowEveryOrdinaryColumnEdit()throws Exception{
+  List<?> tokens=(List<?>)service.captureRows(automaticRequest()).get("envelopes");
+  Map<?,?> packet=new ObjectMapper().readValue(Sm4ExportCodec.decrypt(tokens.get(0).toString(),key),Map.class);assertEquals(4,packet.get("v"));
+  String csv="新增,证件号码,__gateway_sm4\r\nchanged,mask-B,"+tokens.get(1)+"\r\nother,mask-A,"+tokens.get(0)+"\r\n";
+  List<List<String>> out=ExportCsv.parse((String)service.decryptRows(csv,"admin").get("csv"));
+  assertEquals(Arrays.asList("新增","证件号码"),out.get(0));assertEquals(Arrays.asList("changed","raw-B"),out.get(1));
+  assertEquals(Arrays.asList("other","raw-A"),out.get(2));
+  String subset="证件号码,__gateway_sm4\r\nmask-A,"+tokens.get(0)+"\r\n";
+  assertEquals(Arrays.asList("raw-A"),ExportCsv.parse((String)service.decryptRows(subset,"admin").get("csv")).get(1));
+  String meta=jdbc.queryForObject("SELECT metadata FROM sm4_export_batches WHERE id=?",String.class,packet.get("b"));
+  String plain=new String(Sm4ExportCodec.decrypt(meta,key),java.nio.charset.StandardCharsets.UTF_8);
+  assertFalse(plain.contains("raw-A"));assertFalse(plain.contains("mask-A"));
+ }
+ @Test void automaticRowsRejectTamperMissingProtectedColumnsMixedBatchAndDuplicateRows()throws Exception{
+  Map<String,Object> r=automaticRequest();List<?> tokens=(List<?>)service.captureRows(r).get("envelopes");
+  List<?> other=(List<?>)service.captureRows(r).get("envelopes");
+  String line="mask-A,x,"+tokens.get(0)+"\r\n",header="证件号码,备注,__gateway_sm4\r\n",csv=header+line;
+  for(String bad:Arrays.asList(csv.replace("mask-A","changed"),csv.replace("证件号码","renamed"),
+      "备注,__gateway_sm4\r\nx,"+tokens.get(0)+"\r\n",csv.replace(tokens.get(0).toString(),tokens.get(1).toString()),
+      csv+line,csv+"mask-B,x,"+other.get(1)+"\r\n",csv.replace("备注","证件号码"),
+      csv.replace(tokens.get(0).toString(),tokens.get(0).toString().substring(0,40)))){
+   assertThrows(Exception.class,()->service.decryptRows(bad,"admin"));
+  }
+  String id=(String)service.receipts().get(0).get("id");jdbc.update("UPDATE sm4_export_receipts SET revoked=TRUE");
+  assertThrows(SecurityException.class,()->service.decryptRows(csv,"admin"));
+ }
+ @Test void identicalProtectedViewsCanBeSwappedAndAreNotBusinessIdentityProof()throws Exception{
+  Map<String,Object> r=automaticRequest();r.put("displayed",Arrays.asList(Arrays.asList("same",""),Arrays.asList("same","")));
+  List<?> tokens=(List<?>)service.captureRows(r).get("envelopes");
+  String csv="证件号码,__gateway_sm4\r\nsame,"+tokens.get(1)+"\r\nsame,"+tokens.get(0)+"\r\n";
+  List<List<String>> out=ExportCsv.parse((String)service.decryptRows(csv,"admin").get("csv"));
+  assertEquals(Collections.singletonList("raw-B"),out.get(1));assertEquals(Collections.singletonList("raw-A"),out.get(2));
+ }
+ @Test void stopCaptureDoesNotRevokeDecryptButDeleteAndGrantRemovalDo()throws Exception{
+  List<?> tokens=(List<?>)service.captureRows(automaticRequest()).get("envelopes");String csv="证件号码,__gateway_sm4\r\nmask-A,"+tokens.get(0)+"\r\n";
+  Map<String,Object> p=profile(true);p.put("enabled",false);p.put("allowEdit",false);service.save(p);
+  assertTrue(service.decryptRows(csv,"admin").get("csv").toString().contains("raw-A"));
+  Map<String,Object> disabled=request();disabled.put("format","ROW_V2");assertThrows(SecurityException.class,()->service.captureRows(disabled));
+  p.put("allowDecrypt",false);service.save(p);assertThrows(SecurityException.class,()->service.decryptRows(csv,"admin"));
+  p.put("allowDecrypt",true);service.save(p);service.deleteProfile(p);assertTrue(service.profiles().isEmpty());
+  assertThrows(SecurityException.class,()->service.decryptRows(csv,"admin"));service.save(p);
+  assertTrue(service.decryptRows(csv,"admin").get("csv").toString().contains("raw-A"));
+ }
+ @Test void daysBoundsLegacyMinutesAndExistingExpiryArePreserved()throws Exception{
+  List<?> tokens=(List<?>)service.captureRows(automaticRequest()).get("envelopes");
+  long expires=((Number)service.receipts().get(0).get("expiresAt")).longValue();
+  assertTrue(expires-System.currentTimeMillis()>364L*86400000);assertEquals(525600,service.profile("user","db").get("ttlMinutes"));
+  Map<String,Object> p=profile(true);p.put("ttlDays",1);service.save(p);assertEquals(expires,((Number)service.receipts().get(0).get("expiresAt")).longValue());
+  for(Object bad:Arrays.asList(0,366,1.5)){p.put("ttlDays",bad);assertThrows(IllegalArgumentException.class,()->service.save(p));}
+  p.remove("ttlDays");p.put("ttlMinutes",60);service.save(p);p.remove("ttlMinutes");service.save(p);assertEquals(60,service.profile("user","db").get("ttlMinutes"));
+ }
+ @Test void upgradeRemovesLegacyAnchorRequirementWithoutReinterpretingOldFiles()throws Exception{
+  List<?> tokens=(List<?>)service.captureRows(editableRequest()).get("envelopes");service.initialize();
+  assertEquals(true,service.profile("user","db").get("allowEdit"));assertEquals("",service.profile("user","db").get("rowKeyColumn"));
+  String legacy="记录ID,证件号码,__gateway_sm4\r\n1,same-mask,"+tokens.get(0)+"\r\n";
+  assertTrue(service.decryptRows(legacy,"admin").get("csv").toString().contains("first-card"));
+  assertThrows(IllegalArgumentException.class,()->service.decryptRows(legacy.replace("记录ID,","").replace("1,same-mask","same-mask"),"admin"));
+  Map<String,Object> r=request();r.put("format","ROW_V2");List<?> fresh=(List<?>)service.captureRows(r).get("envelopes");
+  assertEquals(4,new ObjectMapper().readValue(Sm4ExportCodec.decrypt(fresh.get(0).toString(),key),Map.class).get("v"));
+ }
+ @Test void autoAssociationTracksBindingsPreservesManualOverridesAndDeletion()throws Exception{
+  AccountAccessStore bindings=new AccountAccessStore(jdbc);bindings.initialize();
+  jdbc.update("INSERT INTO connections(id,name,host,port,username,password_enc,created_at) VALUES(1,'test','localhost',9030,'user','unused','now')");
+  jdbc.update("UPDATE logical_databases SET logical_name='db' WHERE logical_name='PUBLIC'");bindings.bind(1,"db","ACTIVE");
+  Map<String,Object> defaults=profile(true);defaults.put("linked",true);defaults.put("allowEdit",true);defaults.put("ttlDays",10);service.saveDefaults(defaults);
+  assertEquals(true,service.profile("user","db").get("enabled"));assertEquals(1,service.profiles().size());
+  Map<String,Object> manual=profile(false);manual.put("enabled",false);service.save(manual);
+  defaults.put("ttlDays",20);service.saveDefaults(defaults);assertEquals(false,service.profile("user","db").get("allowDecrypt"));
+  service.deleteProfile(manual);assertTrue(service.profiles().isEmpty());assertEquals(false,service.profile("user","db").get("enabled"));
+  service.saveDefaults(defaults);assertTrue(service.profiles().isEmpty());
+  jdbc.update("INSERT INTO logical_databases(connection_id,logical_name,physical_database,storage_unit,status,updated_at) VALUES(1,'next','PUBLIC','unit','ACTIVE','now')");bindings.bind(1,"next","ACTIVE");
+  assertEquals(true,service.profile("user","next").get("enabled"));assertEquals(1,service.profiles().size());
+  bindings.bind(1,"next","REMOVED");assertEquals(false,service.profile("user","next").get("enabled"));
+  bindings.bind(1,"next","ACTIVE");defaults.put("linked",false);service.saveDefaults(defaults);assertEquals(false,service.profile("user","next").get("enabled"));
+  defaults.put("linked",true);service.saveDefaults(defaults);bindings.lifecycle("user","DISABLED",false);assertEquals(false,service.profile("user","next").get("enabled"));
+ }
+ @Test void multiDatabaseSaveIsAtomicAndRejectsUnknownAccountBindings()throws Exception{
+  Map<String,Object> p=profile(true);p.put("databaseNames",Arrays.asList("db","bad"));
+  when(access.resolve("user","bad")).thenThrow(new SecurityException("not bound"));
+  assertThrows(SecurityException.class,()->transactionalService().saveBatch(p));assertTrue(service.profiles().isEmpty());
+  when(access.resolve("user","next")).thenReturn(account);p.put("databaseNames",Arrays.asList("db","next"));transactionalService().saveBatch(p);assertEquals(2,service.profiles().size());
+ }
+
+ @Test void httpProfileCaptureEditedCsvDownloadAndDeletionRoundTrip()throws Exception{
+  org.springframework.test.web.servlet.MockMvc mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(new Sm4ExportController(transactionalService(),access)).build();
+  ObjectMapper json=new ObjectMapper();Map<String,Object> p=profile(true);p.put("allowEdit",true);p.put("ttlDays",365);p.put("databaseNames",Arrays.asList("db"));
+  mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/sm4-export/profiles/batch").contentType("application/json").content(json.writeValueAsBytes(p))).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+  Map<String,Object> r=request();r.put("format","ROW_V2");
+  String response=mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/internal/sql/export-capture").header("X-Gateway-Lineage-Token","test").contentType("application/json").content(json.writeValueAsBytes(r))).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk()).andReturn().getResponse().getContentAsString();
+  String token=((List<?>)json.readValue(response,Map.class).get("envelopes")).get(0).toString();
+  String csv="新增,证件号码,__gateway_sm4\r\n新备注,110101********1234,"+token+"\r\n";
+  String output=mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/sm4-export/decrypt").principal(()->"admin").contentType("application/json").content(json.writeValueAsBytes(Collections.singletonMap("csv",csv)))).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk()).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Cache-Control","no-store")).andReturn().getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+  assertTrue(output.contains("新备注"));assertTrue(output.contains("110101199001011234"));
+  mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete("/api/sm4-export/profiles").contentType("application/json").content(json.writeValueAsBytes(p))).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+  mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/sm4-export/decrypt").principal(()->"admin").contentType("application/json").content(json.writeValueAsBytes(Collections.singletonMap("csv",csv)))).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isForbidden());
+ }
+
 }
