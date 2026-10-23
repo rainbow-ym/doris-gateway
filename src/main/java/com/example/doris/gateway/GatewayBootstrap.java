@@ -4,6 +4,7 @@ package com.example.doris.gateway;
 public final class GatewayBootstrap {
     private GatewayBootstrap() { }
     public static void main(String[] args) throws Exception {
+        com.example.doris.gateway.security.ProxyObservationReporter.initialize();
         if(Boolean.parseBoolean(System.getenv("GATEWAY_MULTI_USER_ENABLED")))
             Class.forName("com.example.doris.gateway.lineage.LineageEventEmitter");
         try {

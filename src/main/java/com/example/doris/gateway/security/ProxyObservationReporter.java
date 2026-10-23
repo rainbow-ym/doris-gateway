@@ -38,7 +38,8 @@ public final class ProxyObservationReporter {
                 long gcMillis=0,gcCount=0;for(java.lang.management.GarbageCollectorMXBean gc:java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()){gcMillis+=Math.max(0,gc.getCollectionTime());gcCount+=Math.max(0,gc.getCollectionCount());}
                 text.append("gateway_proxy_gc_seconds_total ").append(gcMillis/1000.0).append('\n');text.append("gateway_proxy_gc_total ").append(gcCount).append('\n');
                 return text.append(ContainerMetrics.scrape("proxy")).toString();});
-        }catch(Exception failure){System.err.println("Gateway metrics endpoint unavailable; check loopback port and metrics configuration.");}
+            System.err.println("Gateway metrics endpoint ready on loopback; port="+port);
+        }catch(Exception failure){System.err.println("Gateway metrics endpoint unavailable; error="+failure.getClass().getSimpleName()+"; check PROXY_METRICS_PORT and METRICS_PASSWORD (values suppressed).");}
     }
     public static long dropped(){return DROPPED.get();}
     private static void send(Recorder.Record record){

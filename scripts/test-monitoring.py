@@ -1,5 +1,6 @@
 """Configuration/upgrade tests only. Never starts system services or connects to deployments."""
-import importlib.util, io, json, pathlib, tarfile, tempfile, unittest
+import importlib.util, io, json, pathlib, tarfile, tempfile, unittest, configparser, types
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 def load(name, relative):
@@ -9,6 +10,31 @@ monitor=load('monitor', 'packaging/monitoring/install.py')
 upgrade=load('upgrade', 'packaging/clean-install/safe-upgrade.py')
 
 class MonitoringTest(unittest.TestCase):
+    def test_integration_preserves_credentials_and_data_and_closes_public_listener(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=pathlib.Path(temporary).resolve();monitor.config(root,19002,18092,'0.0.0.0')
+            manifest={'root':str(root),'worker_port':19002,'proxy_port':18092,'grafana_bind':'0.0.0.0'}
+            (root/'manifest.json').write_text(json.dumps(manifest));(root/'history-data').write_text('retain')
+            secret=(root/'metrics.env').read_bytes();before=(root/'grafana.ini').read_bytes()
+            monitor.integrate(types.SimpleNamespace(monitor_dir=str(root),platform_url='http://server:19000'))
+            config=configparser.ConfigParser(interpolation=None);config.read(str(root/'grafana.ini'))
+            self.assertEqual('127.0.0.1',config['server']['http_addr']);self.assertEqual('http://server:19000/history/',config['server']['root_url'])
+            self.assertEqual('Viewer',config['users']['auto_assign_org_role']);self.assertEqual('false',config['auth.proxy']['enable_login_token'])
+            self.assertEqual(secret,(root/'metrics.env').read_bytes());self.assertEqual('retain',(root/'history-data').read_text())
+            self.assertEqual(before,next(root.glob('grafana.ini.before-integration-*')).read_bytes())
+            self.assertEqual('/history',json.loads((root/'manifest.json').read_text())['grafana_path'])
+    def test_diagnostics_identify_refused_proxy_without_logging_raw_errors(self):
+        def fake(url):
+            if url.endswith('/targets'):
+                return json.dumps({'data':{'activeTargets':[{'labels':{'job':name},'health':'down' if name=='gateway-proxy' else 'up','lastError':'connection refused password=SECRET'} for name in ['gateway-worker','gateway-proxy','gateway-host']]}}).encode()
+            return b'{"database":"ok"}'
+        with patch.object(monitor.diagnostics,'fetch',side_effect=fake),patch.object(monitor.diagnostics.subprocess,'check_output',return_value=b'ActiveState=active\n'),patch.object(monitor.diagnostics.socket,'create_connection'):
+            result=monitor.diagnostics.inspect({'worker_port':19002,'proxy_port':18092,'grafana_path':'/history'})
+        self.assertFalse(result['ok']);self.assertNotIn('SECRET',json.dumps(result))
+        self.assertEqual('CONNECTION_REFUSED',next(r for r in result['checks'] if r['check']=='scrape:gateway-proxy')['error'])
+    def test_platform_origin_rejects_credentials_and_paths(self):
+        for url in ['http://user:password@host','http://host/path','http://host?x=1','file:///etc/passwd','http://host/%0a']:
+            with self.assertRaises(RuntimeError):monitor.platform_url(url)
     def test_independent_credentials_config_and_offline_dashboard(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=pathlib.Path(temporary)
