@@ -17,6 +17,7 @@ public final class Recorder {
     private final EnumMap<Operation, long[]> histograms = new EnumMap<>(Operation.class);
     private final EnumMap<Reason, Long> results = new EnumMap<>(Reason.class);
     private long active, dropped, evicted;
+    public final CapacityMetrics cumulative = new CapacityMetrics();
     private volatile java.util.function.Consumer<Record> listener = record -> { };
     public void onComplete(java.util.function.Consumer<Record> listener) { this.listener = Objects.requireNonNull(listener); }
 
@@ -59,6 +60,7 @@ public final class Recorder {
     public synchronized long count(Reason reason) { return results.getOrDefault(reason, 0L); }
     public synchronized long[] histogram(Operation operation) { return histograms.get(operation).clone(); }
     private synchronized void complete(Record record, long now) {
+        cumulative.record(record,System.currentTimeMillis());
         active--; results.put(record.reason, count(record.reason) + 1);
         long[] buckets = histograms.get(record.operation); int bucket = 0;
         while (bucket < BUCKET_UPPER_MS.length && record.durationNanos > BUCKET_UPPER_MS[bucket] * 1000000) bucket++;

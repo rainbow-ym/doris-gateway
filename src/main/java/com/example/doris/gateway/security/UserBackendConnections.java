@@ -35,6 +35,14 @@ public final class UserBackendConnections {
         observeEpoch(user,epoch);
         if(session.getConnectionId()<=EPOCHS.get(user)[1])throw new SQLException("账号权限或凭据已变更，请断开并重新连接网关。","28000");
     }
+    public static Map<String,Long> poolMetrics(){
+        Map<String,Long> result=new LinkedHashMap<>();long active=0,idle=0,pending=0,total=0,maximum=0;
+        synchronized(POOLS){for(HikariDataSource pool:POOLS.values()){
+            com.zaxxer.hikari.HikariPoolMXBean bean=pool.getHikariPoolMXBean();if(bean==null)continue;
+            active+=bean.getActiveConnections();idle+=bean.getIdleConnections();pending+=bean.getThreadsAwaitingConnection();total+=bean.getTotalConnections();maximum+=pool.getMaximumPoolSize();
+        }result.put("pools",(long)POOLS.size());}
+        result.put("active",active);result.put("idle",idle);result.put("pending",pending);result.put("total",total);result.put("maximum",maximum);return result;
+    }
     private UserBackendConnections() { }
     public static boolean enabled() { return "true".equalsIgnoreCase(System.getenv("GATEWAY_MULTI_USER_ENABLED")); }
     public static void validate(ConnectionSession session,String database) throws SQLException {

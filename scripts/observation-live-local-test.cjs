@@ -19,10 +19,12 @@ if(!java||!fs.existsSync(jar))throw Error('Set OBS_JAVA and build the Worker jar
   assert.equal((await fetch(base+'/api/internal/sql/observation',{method:'POST',headers:{'Content-Type':'application/json','X-Gateway-Lineage-Token':'wrong'},body:JSON.stringify(event)})).status,403);
   for(let i=0;i<23;i++){event.requestId=i?crypto.randomUUID():id;event.spanId=crypto.randomUUID();assert.equal((await fetch(base+'/api/internal/sql/observation',{method:'POST',headers:{'Content-Type':'application/json','X-Gateway-Lineage-Token':token},body:JSON.stringify(event)})).status,200);}
   const metrics=await(await fetch(base+'/api/observability/metrics',{headers})).text();assert.match(metrics,/gateway_crypto_duration_seconds_bucket/);assert(!metrics.includes(id));
+  const slow=await(await fetch(base+'/api/observability/slowest?component=proxy&operation=ENCRYPT_QUERY',{headers})).json();assert.equal(slow.length,20);
   browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
   const page=await browser.newPage({httpCredentials:{username:'observer',password},viewport:{width:1400,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base+'/');await page.getByRole('button',{name:'加解密运行监控',exact:true}).click();
   await page.selectOption('#obsComponent','proxy');await page.waitForFunction(()=>document.querySelector('#obsPage').textContent.includes('23'));
+  assert.equal(await page.locator('#obsSlow button').count(),20);
   await page.getByRole('button',{name:'查看详情',exact:true}).first().click();await page.waitForSelector('#obsDetail[open]');assert.match(await page.locator('#obsDetailBody').innerText(),/权限不足/);
   await page.locator('#obsClose').click();await page.locator('#obsNext').click();await page.waitForFunction(()=>document.querySelector('#obsPage').textContent.includes('第 2'));
   assert.equal(await page.locator('#obsRequests button').count(),3);

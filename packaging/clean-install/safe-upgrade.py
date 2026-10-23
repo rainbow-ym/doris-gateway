@@ -72,6 +72,7 @@ def validate(info,expected):
 
 def run_container(state,kind,staged):
     old=state[kind];name=old['Name'].lstrip('/');e=env(old)
+    if kind in ('worker','proxy'):e.update(state.get('metrics_env',{}))
     if staged:
         if kind=='worker':e.update(ADMIN_BIND_ADDRESS='127.0.0.1',PROXY_HOST='127.0.0.1')
         else:e['GATEWAY_BIND_ADDRESS']='127.0.0.1'
@@ -125,7 +126,16 @@ def restore(state,path):
     if state.get('platform') and state['platform']['State']['Running']:docker('start',state['platform']['Name'].lstrip('/'))
     state['phase']='ROLLED_BACK';save(state,path);print('已恢复原容器和冷备。失败现场及备份均保留，未删除。')
 
+def metrics_env(path):
+    if not path:return {}
+    with open(path,encoding='utf-8') as f: lines=f.read().splitlines()
+    values=dict(line.split('=',1) for line in lines if line.strip() and not line.startswith('#'))
+    if set(values)!={'METRICS_PASSWORD','PROXY_METRICS_PORT'} or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}',values['METRICS_PASSWORD']):raise RuntimeError('监控凭据文件格式无效')
+    if not values['PROXY_METRICS_PORT'].isdigit() or not 1024<=int(values['PROXY_METRICS_PORT'])<=65535:raise RuntimeError('监控端口无效')
+    return values
+
 def stage(args):
+    overrides=metrics_env(getattr(args,"metrics_env",None))
     worker=inspect(args.worker);proxy=inspect(args.proxy)
     validate(worker,{'/opt/gateway-admin/data'});validate(proxy,{'/opt/gateway/conf','/opt/gateway/logs'})
     if args.worker==args.proxy or args.platform in (args.worker,args.proxy):raise RuntimeError('容器名称必须不同。')
@@ -151,6 +161,7 @@ def stage(args):
     state={'id':token,'backup':backup,'phase':'PREPARED','worker':worker,'proxy':proxy,'platform':platform,
            'worker_image':inspect(args.worker_image)['Id'],'proxy_image':inspect(args.proxy_image)['Id'],
            'directories':[{'source':p,'backup':os.path.join(backup,'data-'+str(i))} for i,p in enumerate(paths)]}
+    state['metrics_env']=overrides
     if args.platform_image:state['platform_image']=inspect(args.platform_image)['Id']
     path=os.path.join(backup,'state.json');save(state,path);print('升级状态文件：'+path,flush=True)
     try:
@@ -171,6 +182,7 @@ def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='action')
     s=sub.add_parser('stage')
     for name in ('worker','proxy','worker-image','proxy-image','backup-root'):s.add_argument('--'+name,required=True)
+    s.add_argument('--metrics-env',help='仅允许独立监控密码及 Proxy 本机采集端口')
     s.add_argument('--platform');s.add_argument('--no-platform',action='store_true');s.add_argument('--maintenance-confirmed',action='store_true')
     s.add_argument('--platform-image',help='同时冷备平台数据，并在 accept 时保留原挂载和凭据升级平台。')
     for name in ('accept','rollback'):

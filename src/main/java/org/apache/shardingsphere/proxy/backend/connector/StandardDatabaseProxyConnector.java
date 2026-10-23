@@ -124,6 +124,7 @@ public final class StandardDatabaseProxyConnector implements DatabaseProxyConnec
 
     private MergedResult mergedResult;
     private com.example.doris.gateway.security.Sm4ExportRows sm4ExportRows;
+    static { com.example.doris.gateway.security.ProxyObservationReporter.initialize(); }
 
     public StandardDatabaseProxyConnector(final JDBCDriverType driverType, final QueryContext queryContext, final ProxyDatabaseConnectionManager databaseConnectionManager) {
         this.driverType = driverType;

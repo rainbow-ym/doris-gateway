@@ -9,7 +9,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 import static org.mockito.Mockito.*;
 import java.util.Base64;
-@WebMvcTest(controllers=ObservationController.class,properties={"ADMIN_USERNAME=observer","ADMIN_PASSWORD=local-test-only-12345"})
+@WebMvcTest(controllers=ObservationController.class,properties={"ADMIN_USERNAME=observer","ADMIN_PASSWORD=local-test-only-12345","METRICS_PASSWORD=metrics-test-only-1234567890123456"})
 @Import({SecurityConfig.class,CryptoObservations.class,ObservationHttpBoundary.class})
 class ObservationSecurityTest {
  @Autowired MockMvc mvc;
@@ -25,5 +25,12 @@ class ObservationSecurityTest {
   doThrow(new SecurityException()).when(access).authenticate("wrong");
   mvc.perform(post("/api/internal/sql/observation").header("X-Gateway-Lineage-Token","wrong").contentType("application/json").content("{}")).andExpect(status().isForbidden());
   mvc.perform(post("/api/internal/sql/observation").header("X-Gateway-Lineage-Token","wrong").contentType("application/json").content(new byte[17000])).andExpect(status().isPayloadTooLarge());
+ }
+ @Test void collectorCanOnlyReadMetrics()throws Exception{
+  String header="Basic "+Base64.getEncoder().encodeToString("gateway_metrics:metrics-test-only-1234567890123456".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+  mvc.perform(get("/api/observability/metrics").header("Authorization",header)).andExpect(status().isOk());
+  mvc.perform(get("/api/observability/status").header("Authorization",header)).andExpect(status().isForbidden());
+  mvc.perform(get("/api/connections").header("Authorization",header)).andExpect(status().isForbidden());
+  mvc.perform(post("/api/sm4-export/decrypt").header("Authorization",header).contentType("application/json").content("{}")).andExpect(status().isForbidden());
  }
 }

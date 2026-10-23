@@ -63,7 +63,7 @@ def execute(args,base):
             if (base/'gateway-platform-0.1.0.jar').is_file():
                 image_args+=['--platform-image','doris-security-gateway-platform:'+tag]
         run(sys.executable,helper,'stage','--worker',worker,'--proxy',proxy,'--platform',platform,
-            *image_args,'--backup-root',str(session),'--maintenance-confirmed')
+            *image_args,*(['--metrics-env',os.path.abspath(args.metrics_env)] if getattr(args,'metrics_env',None) else []),'--backup-root',str(session),'--maintenance-confirmed')
         states=list(session.glob('upgrade-*/state.json'))
         if len(states)!=1:raise RuntimeError('无法唯一确认本次备份状态；停止，不猜测恢复路径')
         statepath=states[0]
@@ -88,6 +88,7 @@ def main():
     parser=argparse.ArgumentParser(description='一键离线更新：会中断查询、冷备、重启并自动恢复业务入口。')
     parser.add_argument('--install-dir',required=True,help='已有安装目录，例如 /data/doris-gateway/install_dir')
     parser.add_argument('--backup-dir',required=True,help='安装目录外的备份目录，可自动创建')
+    parser.add_argument('--metrics-env',help='监控安装工具生成的独立采集凭据文件')
     parser.add_argument('--prefix',default='doris-gateway',help='容器名前缀，默认 doris-gateway')
     args=parser.parse_args();os.umask(0o077)
     if not os.path.isabs(args.install_dir) or not os.path.isabs(args.backup_dir):
