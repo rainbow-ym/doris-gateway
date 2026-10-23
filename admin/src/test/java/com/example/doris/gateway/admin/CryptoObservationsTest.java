@@ -42,6 +42,16 @@ class CryptoObservationsTest {
         Telemetry.Session s=Telemetry.begin(Operation.DECRYPT_FILE,null,null);
         assertDoesNotThrow(()->s.finish(null));assertEquals(0L,Telemetry.RECORDER.status().get("active"));
     }
+    @Test void slowSamplesRemainBoundedAndAccessibleAfterHistoryEviction(){
+        CryptoObservations.Event slow=event();slow.durationNanos=60000000000L;observations.accept(slow,true);
+        for(int i=0;i<2005;i++)observations.accept(event(),true);
+        List<CryptoObservations.Event> retained=observations.slowest("proxy",Operation.ENCRYPT_QUERY);
+        assertEquals(20,retained.size());assertEquals(slow.requestId,retained.get(0).requestId);
+        assertEquals(1,observations.detail(slow.requestId).size());
+        slow.receivedAtMillis=System.currentTimeMillis()-3600001L;
+        assertFalse(observations.slowest("proxy",Operation.ENCRYPT_QUERY).contains(slow));
+        assertTrue(observations.detail(slow.requestId).isEmpty());
+    }
     @Test void noSampleAndUnsupportedResourcesAreNotReportedAsZero(){
         assertNull(observations.summary("worker",Operation.ENCRYPT_QUERY,15).get("p95Ms"));
         assertNull(observations.status().get("containerMemory"));assertNull(observations.status().get("connectionPool"));

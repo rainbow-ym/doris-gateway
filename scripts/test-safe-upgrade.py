@@ -13,7 +13,8 @@ class RestoreTest(unittest.TestCase):
                  'HostConfig':{'RestartPolicy':{'Name':'unless-stopped'},'Memory':4294967296,
                                'MemorySwap':4294967296,'NanoCpus':8000000000,'CpusetCpus':'0-15',
                                'PidsLimit':1024,'Ulimits':[{'Name':'nofile','Soft':65536,'Hard':65536}]}}
-            state={'worker':old,'worker_image':'sha256:test','backup':root,'id':'test'}
+            state={'worker':old,'worker_image':'sha256:test','backup':root,'id':'test',
+                   'metrics_env':{'METRICS_PASSWORD':'private-test-password','PROXY_METRICS_PORT':'18092'}}
             with patch.object(upgrade,'docker') as docker,patch.object(upgrade.socket,'gethostname',return_value='host'):
                 upgrade.run_container(state,'worker',True)
             args=docker.call_args[0]
@@ -22,6 +23,9 @@ class RestoreTest(unittest.TestCase):
                                ('--ulimit','nofile=65536:65536')):
                 self.assertEqual(value,args[args.index(flag)+1])
             self.assertEqual(['ADMIN_PORT=18082'],old['Config']['Env'])
+            replacement=(pathlib.Path(root)/'worker-staged.env').read_text()
+            self.assertIn('METRICS_PASSWORD=private-test-password',replacement)
+            self.assertIn('ADMIN_PORT=18082',replacement)
     def test_failed_copy_is_not_mistaken_for_restored_database(self):
         with tempfile.TemporaryDirectory() as root:
             root=pathlib.Path(root);source=root/'live';backup=root/'backup'

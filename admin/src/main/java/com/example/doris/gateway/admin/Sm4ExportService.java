@@ -289,7 +289,7 @@ public class Sm4ExportService {
             Map<String,Object> restored=decrypt(single,administrator,"ROW_V2");
             output.add(ExportCsv.parse((String)restored.get("csv")).get(1));
         }
-        Map<String,Object> result=new LinkedHashMap<>();result.put("csv",ExportCsv.write(output));result.put("filename","decrypted-rows-"+UUID.randomUUID()+".csv");result.put("rowCount",input.size());return result;
+        Map<String,Object> result=new LinkedHashMap<>();try(Observation.Scope ignored=Telemetry.current().stage(Stage.CSV_WRITE)){result.put("csv",ExportCsv.write(output));}result.put("filename","decrypted-rows-"+UUID.randomUUID()+".csv");result.put("rowCount",input.size());return result;
     }
     @SuppressWarnings("unchecked")
     private Map<String,Object> captureEditable(Map<String,Object> request,Map<String,Object> policy,
@@ -378,7 +378,7 @@ public class Sm4ExportService {
                 String envelope=row.get(row.size()-1),version=Sm4ExportCodec.keyId(envelope);
                 if(!keys.containsKey(version))keys.put(version,key(version));
                 Telemetry.current().add(Measure.CIPHERTEXT_BYTES,envelope.length());
-                Map<String,Object> packet=json.readValue(decryptObserved(envelope,keys.get(version)),Map.class);
+                Map<String,Object> packet=json.readValue(decryptObserved(envelope,keys.get(version),true),Map.class);
                 if(!Integer.valueOf(format).equals(packet.get("v")))throw new IllegalArgumentException("不能混合新旧格式文件。");
                 String id=text(packet,"b");
                 if(metadata==null){
@@ -407,16 +407,19 @@ public class Sm4ExportService {
                 Object ordinal=packet.get("r");
                 if(!(ordinal instanceof Integer)||(Integer)ordinal<0||(Integer)ordinal>=total||!seen.add((Integer)ordinal))
                     throw new IllegalArgumentException("密文行重复或行标识无效。");
+                try(Observation.Scope restoring=Telemetry.current().stage(Stage.RESTORE)){
                 List<String> checked=selectColumns(labels,row,checkedLabels);
                 if(!digest(checkedLabels,Collections.singletonList(checked)).equals(packet.get("d")))
                     {Telemetry.current().reason(Reason.TAMPERED);throw new IllegalArgumentException(format>=4?"受保护内容被修改，或与该行密文不匹配；拒绝还原。":"受保护内容或记录标识被修改，或密文被放到其他记录；拒绝还原。");}
                 List<Object> raw=(List<Object>)packet.get("o");
+                Telemetry.current().add(Measure.PROTECTED_CELLS,raw.size());
                 int offset=format==3?1:0;
                 List<String> restoreLabels=format==5?(List<String>)metadata.get("protectedLabels"):checkedLabels.subList(offset,checkedLabels.size());
                 if(raw.size()!=restoreLabels.size())throw new IllegalArgumentException("密文保护字段结构无效。");
                 List<String> restored=new ArrayList<>(row.subList(0,labels.size()));
                 for(int i=0;i<raw.size();i++)restored.set(labels.indexOf(restoreLabels.get(i)),format==5?ExportValue.decode(raw.get(i)):raw.get(i)==null?"":String.valueOf(raw.get(i)));
                 output.add(restored);
+                }
             }
             // Recheck revocation and expiry before releasing any plaintext.
             if(jdbc.queryForObject("SELECT COUNT(*) FROM sm4_export_receipts WHERE id=? AND revoked=FALSE AND expires_at>=?",Integer.class,batch,System.currentTimeMillis())!=1)
@@ -428,7 +431,7 @@ public class Sm4ExportService {
                 throw new SecurityException("解密期间账号授权已变化。");
             checkPermissions(currentAccount,bindSources((List<Map<String,String>>)metadata.get("sources"),true));
             store.audit("SM4_EXPORT_DECRYPTED","id="+batch+",administrator="+administrator+",rows="+input.size());
-            Map<String,Object> result=new LinkedHashMap<>();result.put("csv",ExportCsv.write(output));
+            Map<String,Object> result=new LinkedHashMap<>();try(Observation.Scope ignored=Telemetry.current().stage(Stage.CSV_WRITE)){result.put("csv",ExportCsv.write(output));}
             result.put("filename","decrypted-editable-"+UUID.randomUUID()+".csv");result.put("rowCount",input.size());return result;
         }catch(Exception e){store.audit("SM4_EXPORT_DECRYPT_DENIED","id="+batch+",administrator="+administrator);if(e instanceof IllegalArgumentException)throw new IllegalArgumentException("CSV 第 "+csvRow+" 行："+e.getMessage(),e);throw e;}
         finally{slots.release();}
@@ -528,10 +531,11 @@ public class Sm4ExportService {
     private String encryptObserved(Object payload,byte[] encryptionKey)throws Exception {
         byte[] plain;try(Observation.Scope ignored=Telemetry.current().stage(Stage.SERIALIZE)){plain=json.writeValueAsBytes(payload);}
         Telemetry.current().add(Measure.PAYLOAD_BYTES,plain.length);
-        try(Observation.Scope ignored=Telemetry.current().stage(Stage.SM4_ENCRYPT)){return Sm4ExportCodec.encrypt(plain,currentKey,encryptionKey);}
+        try(Observation.Scope kind=Telemetry.current().stage(payload instanceof Map&&((Map<?,?>)payload).containsKey("r")?Stage.ROW_ENCRYPT:Stage.METADATA_ENCRYPT);Observation.Scope ignored=Telemetry.current().stage(Stage.SM4_ENCRYPT)){return Sm4ExportCodec.encrypt(plain,currentKey,encryptionKey);}
     }
-    private byte[] decryptObserved(String envelope,byte[] decryptionKey)throws Exception {
-        byte[] plain;try(Observation.Scope ignored=Telemetry.current().stage(Stage.SM4_DECRYPT)){plain=Sm4ExportCodec.decrypt(envelope,decryptionKey);}
+    private byte[] decryptObserved(String envelope,byte[] decryptionKey)throws Exception {return decryptObserved(envelope,decryptionKey,false);}
+    private byte[] decryptObserved(String envelope,byte[] decryptionKey,boolean row)throws Exception {
+        byte[] plain;try(Observation.Scope kind=Telemetry.current().stage(row?Stage.ROW_DECRYPT:Stage.AUX_DECRYPT);Observation.Scope ignored=Telemetry.current().stage(Stage.SM4_DECRYPT)){plain=Sm4ExportCodec.decrypt(envelope,decryptionKey);}
         Telemetry.current().add(Measure.PAYLOAD_BYTES,plain.length);return plain;
     }
     private static void requireUnambiguousRows(List<List<String>> rows,List<Map<String,Object>> originals){

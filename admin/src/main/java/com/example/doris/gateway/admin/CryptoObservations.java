@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 public class CryptoObservations {
     private final PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
     private final Deque<Event> history = new ArrayDeque<>();
+    private final Map<String,PriorityQueue<Event>> slowest = new HashMap<>();
     private final Map<String,Bucket[]> windows = new HashMap<>();
     private final LinkedHashMap<String,Boolean> recentIds = new LinkedHashMap<>();
     private long evicted, rejected, lastProxyAt, proxyDropped, sampledOut, sequence;
@@ -39,7 +40,7 @@ public class CryptoObservations {
         Telemetry.RECORDER.onComplete(r->accept(Event.from(r),false));
     }
     @PreDestroy public void stop() { Telemetry.RECORDER.onComplete(r->{ }); if(journal!=null)journal.close(); gc.close(); registry.close(); }
-    public String scrape() { return registry.scrape(); }
+    public String scrape() { return registry.scrape()+Telemetry.RECORDER.cumulative.scrape("worker",System.currentTimeMillis())+ContainerMetrics.scrape("worker"); }
     public static class Timing { public long calls,totalNanos,maxNanos; }
     public static class Event {
         public int schemaVersion=1;
@@ -77,7 +78,10 @@ public class CryptoObservations {
         if(e.startedAtMillis<now-86400000L||e.startedAtMillis>now+120000L)e.startedAtMillis=0;
         boolean retain=e.reason!=Reason.OK||sequence++%sampleEvery==0;
         purge(now);if(retain){if(history.size()>=2000){history.removeFirst();evicted++;}history.addLast(e);}else sampledOut++;
-        String key=e.component+":"+e.operation;Bucket[] ring=windows.computeIfAbsent(key,k->new Bucket[60]);
+        String key=e.component+":"+e.operation;
+        PriorityQueue<Event> slow=slowest.computeIfAbsent(key,k->new PriorityQueue<>(Comparator.comparingLong(item->item.durationNanos)));
+        slow.removeIf(item->now-item.receivedAtMillis>3600000L);slow.offer(e);if(slow.size()>20)slow.poll();
+        Bucket[] ring=windows.computeIfAbsent(key,k->new Bucket[60]);
         long minute=now/60000;int index=(int)(minute%60);if(ring[index]==null||ring[index].minute!=minute)ring[index]=new Bucket(minute);
         ring[index].add(e);
         String[] tags={"component",e.component,"operation",e.operation.name()};
@@ -125,7 +129,12 @@ public class CryptoObservations {
         List<Event> rows=new ArrayList<>();Iterator<Event> it=history.descendingIterator();while(it.hasNext()){Event e=it.next();if(e.component.equals(component)&&e.operation==operation&&(outcome==null||e.reason.outcome==outcome))rows.add(e);}
         int start=Math.min(rows.size(),(page-1)*size);Map<String,Object> result=new LinkedHashMap<>();result.put("total",rows.size());result.put("items",new ArrayList<>(rows.subList(start,Math.min(rows.size(),start+size))));return result;
     }
-    public synchronized List<Event> detail(String id) {if(!uuid(id))throw new IllegalArgumentException("请求编号无效");purge(System.currentTimeMillis());List<Event> result=new ArrayList<>();for(Event e:history)if(e.requestId.equals(id))result.add(e);return result;}
+    public synchronized List<Event> detail(String id) {if(!uuid(id))throw new IllegalArgumentException("请求编号无效");purge(System.currentTimeMillis());List<Event> result=new ArrayList<>();for(Event e:history)if(e.requestId.equals(id))result.add(e);for(PriorityQueue<Event> entries:slowest.values())for(Event e:entries)if(e.requestId.equals(id)&&System.currentTimeMillis()-e.receivedAtMillis<=3600000L&&!result.contains(e))result.add(e);return result;}
+    public synchronized List<Event> slowest(String component,Operation operation){
+        validate(component,operation,60);long now=System.currentTimeMillis();PriorityQueue<Event> entries=slowest.get(component+":"+operation);
+        if(entries==null)return Collections.emptyList();entries.removeIf(e->now-e.receivedAtMillis>3600000L);
+        List<Event> result=new ArrayList<>(entries);result.sort(Comparator.comparingLong((Event e)->e.durationNanos).reversed());return result;
+    }
     private static class Bucket {
         final long minute;long count,nanos;long[] histogram=new long[BOUNDS.length+1];
         Map<Reason,Long> reasons=new EnumMap<>(Reason.class);Map<Measure,Long> measures=new EnumMap<>(Measure.class);Map<Stage,Long> stages=new EnumMap<>(Stage.class);

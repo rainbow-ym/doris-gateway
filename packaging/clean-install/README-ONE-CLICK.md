@@ -1,6 +1,6 @@
 # 一键更新
 
-本次类型适配增量包目录为 `sm4-types-oneclick-20261021`，包含 Worker、Proxy、Platform 三份 JAR，依赖服务器已有运行镜像。请阅读 `SM4-DORIS4-TYPES.md`；受保护列改为文本类型，普通列保留原类型。
+本次历史监控集成包目录为 `crypto-history-oneclick-20261023`，包含 Worker、Proxy、Platform 三份 JAR，依赖服务器已有运行镜像。请优先阅读 `CRYPTO-CAPACITY.md`：update.sh 携带 `--monitor-dir` 和 `--platform-url` 可一次完成网关更新与平台内历史看板接入，自动复用旧监控数据。省略监控参数只更新网关代码。Grafana 13000 仅本机监听，不再使用 `--grafana-bind`。
 
 ## 完整镜像包（包含 offline-images.json）
 

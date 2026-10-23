@@ -27,12 +27,13 @@ public final class Sm4ExportRows {
     private int index=-1;
     private boolean released;
     private final Telemetry.Session observation;
-    private Sm4ExportRows(List<Object[]> rows,Telemetry.Session observation){this.rows=rows;this.observation=observation;}
+    private final Observation.Scope drain;
+    private Sm4ExportRows(List<Object[]> rows,Telemetry.Session observation){this.rows=rows;this.observation=observation;this.drain=observation.stage(Stage.RESULT_DRAIN);}
     public boolean next(){boolean has=++index<rows.size();if(!has)clear();return has;}
     public Object value(int column){return rows.get(index)[column];}
     public void clear(){
         int size=rows.size();boolean exhausted=index>=size;
-        rows.clear();if(!released){released=true;SLOTS.release();
+        rows.clear();if(!released){released=true;drain.close();SLOTS.release();
             observation.add(Measure.BUFFER_ROWS_RELEASED,size);observation.add(Measure.PERMIT_RELEASED,1);
             observation.add(Measure.CONSUMED_ROWS,Math.min(size,Math.max(0,index+1)));
             observation.finishAs(exhausted?Reason.OK:Reason.RESULT_ABANDONED);

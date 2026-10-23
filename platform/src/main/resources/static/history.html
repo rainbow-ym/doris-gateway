@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>历史监控 · 数据安全网关</title>
+<style>body{margin:0;font:15px system-ui;background:#f5f7fb;color:#18283e}header{padding:16px 24px;background:#14263f;color:white;display:flex;align-items:center;gap:24px}header a{color:white}h1{font-size:20px;margin:0}p{margin:12px 24px}iframe{width:100%;height:calc(100vh - 120px);border:0}#error{color:#b91c1c}</style>
+<header><a href="/">返回集群管理</a><h1>本机历史监控</h1><span id="user"></span></header>
+<p>当前平台所在服务器的网关与主机指标，不代表所有已登记的远程集群。时间范围、组件和操作可在看板中切换。</p>
+<p id="error" role="alert"></p><iframe id="dashboard" title="加解密历史监控看板"></iframe>
+<script>
+async function check(){const r=await fetch('/api/session',{cache:'no-store'});const s=await r.json();if(!s.authenticated){location.replace('/login.html');return false}document.getElementById('user').textContent=s.username;return true}
+(async()=>{if(await check())document.getElementById('dashboard').src='/history/d/gateway-capacity?orgId=1&kiosk';setInterval(()=>check().catch(()=>{document.getElementById('error').textContent='无法验证登录状态，请刷新页面。'}),30000)})().catch(()=>{document.getElementById('error').textContent='历史监控加载失败，请刷新或重新登录。'});
+</script></html>

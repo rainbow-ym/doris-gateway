@@ -1,0 +1,73 @@
+{
+  "groups": [
+    {
+      "name": "gateway-capacity",
+      "rules": [
+        {
+          "alert": "GatewayMetricsUnavailable",
+          "expr": "up{job=~\"gateway-.*\"} == 0",
+          "for": "1m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "网关监控采集失败，容量统计不完整"
+          }
+        },
+        {
+          "alert": "GatewayDetailLoss",
+          "expr": "increase(gateway_export_detail_dropped_total[5m]) > 0",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Proxy 请求详情丢失；累计指标由本机独立采集"
+          }
+        },
+        {
+          "alert": "GatewayObservationLoss",
+          "expr": "increase(gateway_observation_dropped[5m]) > 0 or increase(gateway_export_observation_dropped[5m]) > 0",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "核心观测出现缺口，停止据此推断最大容量"
+          }
+        },
+        {
+          "alert": "GatewayPoolWaiting",
+          "expr": "gateway_proxy_pool_pending > 0",
+          "for": "2m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "数据库连接池持续等待"
+          }
+        },
+        {
+          "alert": "GatewayRequestErrors",
+          "expr": "sum by(component,operation)(rate(gateway_export_duration_seconds_count{outcome=~\"DEPENDENCY_ERROR|INTERNAL_ERROR|BUSY\"}[5m])) / sum by(component,operation)(rate(gateway_export_duration_seconds_count[5m])) > 0.01",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "依赖错误、内部错误或繁忙占比超过初始阈值 1%"
+          }
+        },
+        {
+          "alert": "GatewayLatency",
+          "expr": "histogram_quantile(0.95,sum by(component,operation,le)(rate(gateway_export_duration_seconds_bucket{outcome=\"SUCCESS\"}[5m]))) > 5",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "成功请求 P95 超过初始阈值 5 秒，按业务 SLO 调整"
+          }
+        }
+      ]
+    }
+  ]
+}

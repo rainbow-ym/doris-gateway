@@ -18,10 +18,16 @@ public class SecurityConfig extends WebSecurityConfigurerAdapter {
     @Value("${ADMIN_PASSWORD:}")
     private String password;
 
+    @Value("${METRICS_PASSWORD:}") private String metricsPassword;
+
     @Override
     protected void configure(final AuthenticationManagerBuilder auth) throws Exception {
         if (password == null || password.length() < 12) {
             throw new IllegalStateException("ADMIN_PASSWORD must contain at least 12 characters.");
+        }
+        if(!metricsPassword.isEmpty()){
+            if(metricsPassword.length()<24||"gateway_metrics".equals(username))throw new IllegalStateException("Invalid metrics credentials");
+            auth.inMemoryAuthentication().withUser("gateway_metrics").password("{noop}"+metricsPassword).roles("METRICS");
         }
         auth.inMemoryAuthentication().withUser(username).password("{noop}" + password).roles("ADMIN");
     }
@@ -29,7 +35,8 @@ public class SecurityConfig extends WebSecurityConfigurerAdapter {
     @Override
     protected void configure(final HttpSecurity http) throws Exception {
         http.authorizeRequests().antMatchers("/api/health", "/api/internal/lineage/events", "/api/internal/sql/**").permitAll()
-                .antMatchers("/api/versions/*/recovery", "/api/observability/**", "/api/sm4-export/**").hasRole("ADMIN").anyRequest().authenticated()
+                .antMatchers(org.springframework.http.HttpMethod.GET,"/api/observability/metrics").hasAnyRole("METRICS","ADMIN")
+                .antMatchers("/api/versions/*/recovery", "/api/observability/**", "/api/sm4-export/**").hasRole("ADMIN").anyRequest().hasRole("ADMIN")
                 .and().httpBasic()
                 .and().csrf().disable()
                 .headers().frameOptions().deny().contentTypeOptions();

@@ -32,7 +32,8 @@ public class PlatformSecurity extends WebSecurityConfigurerAdapter {
                 else s.sendRedirect("/login.html");
             }).and().addFilterBefore(throttle,UsernamePasswordAuthenticationFilter.class);
         h.sessionManagement().sessionFixation().changeSessionId().maximumSessions(10).sessionRegistry(sessionRegistry());
-        h.headers().frameOptions().deny().contentTypeOptions();
-        // CSRF remains enabled, including login, logout, relayed mutations and password changes.
+        h.headers().frameOptions().disable().addHeaderWriter((request,response)->response.setHeader("X-Frame-Options",request.getRequestURI().startsWith("/history/")?"SAMEORIGIN":"DENY")).contentTypeOptions();
+        h.csrf().ignoringRequestMatchers(HistoryController::readPost);
+        // All mutations retain CSRF; the read-only Grafana query POST checks Origin and JSON in its controller.
     }
 }
